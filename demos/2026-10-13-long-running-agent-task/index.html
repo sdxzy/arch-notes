@@ -1,0 +1,26 @@
+<!doctype html><meta charset="utf-8"><title>AI 周报 Demo</title>
+<style>body{font-family:sans-serif;max-width:560px;margin:40px auto}#bar{height:18px;background:#eee;border-radius:9px}#fill{height:100%;width:0;background:#4c8;border-radius:9px;transition:width .3s}pre{background:#f6f6f6;padding:8px}</style>
+<h2>AI 写周报</h2>
+<button id="go">生成周报</button> <label><input type="checkbox" id="nosse"> 禁用 SSE（模拟网关不支持长连接）</label>
+<p id="msg">未开始</p><div id="bar"><div id="fill"></div></div><pre id="log"></pre>
+<script>
+const $ = id => document.getElementById(id);
+let key = null, pollTimer = null;
+function render(t){ $("fill").style.width=t.progress+"%"; $("msg").textContent=`[${t.status}] ${t.stepName} ${t.error??""}`;
+  if(t.result) $("log").textContent=t.result; if(t.status==="failed"||t.status==="succeeded"){ $("go").disabled=false; key=null; } }
+function poll(id){ clearInterval(pollTimer); pollTimer=setInterval(async()=>{ const t=await (await fetch("/tasks/"+id)).json(); render(t);
+  if(t.status==="succeeded"||t.status==="failed") clearInterval(pollTimer); },2000); }
+function listen(id){
+  if($("nosse").checked || !window.EventSource) return poll(id);
+  const es=new EventSource(`/tasks/${id}/events`); let done=false;
+  es.addEventListener("progress",e=>{ const t=JSON.parse(e.data); render(t); if(t.status==="succeeded"||t.status==="failed"){done=true;es.close();} });
+  es.onerror=async()=>{ if(done) return; es.close(); $("log").textContent+="SSE 断开，降级为轮询\n";
+    render(await (await fetch("/tasks/"+id)).json()); poll(id); };   // 先对齐一次状态再轮询
+}
+$("go").onclick=async()=>{
+  key ??= crypto.randomUUID();      // 同一次点击意图复用同一个 key：连点/重试不会建重复任务
+  $("go").disabled=true; $("log").textContent="";
+  const t=await (await fetch("/tasks",{method:"POST",headers:{"Idempotency-Key":key}})).json();
+  render(t); listen(t.id);
+};
+</script>

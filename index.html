@@ -1,0 +1,39 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>架构笔记</title>
+<link rel="stylesheet" id="hl" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
+<style>
+:root{--bg:#fff;--fg:#1f2328;--mut:#666;--card:#f6f8fa;--acc:#2f81f7;--bd:#d0d7de}
+[data-theme=dark]{--bg:#0d1117;--fg:#e6edf3;--mut:#9198a1;--card:#161b22;--acc:#58a6ff;--bd:#30363d}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.75 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+main{max-width:780px;margin:0 auto;padding:24px 18px 80px}header{display:flex;justify-content:space-between;align-items:center}
+a{color:var(--acc);text-decoration:none}.card{display:block;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin:14px 0;color:var(--fg)}
+.tag{font-size:12px;background:var(--bd);border-radius:99px;padding:2px 9px;margin-right:6px}.date{color:var(--mut);font-size:14px}
+pre{background:var(--card);border:1px solid var(--bd);border-radius:8px;overflow:auto;padding:12px}code{font-size:14px}
+table{border-collapse:collapse;display:block;overflow:auto}td,th{border:1px solid var(--bd);padding:6px 10px}
+button{background:none;border:1px solid var(--bd);color:var(--fg);border-radius:8px;padding:4px 10px;cursor:pointer}
+.files a{margin-right:14px}
+</style></head><body><main>
+<header><a href="#/"><h1 style="margin:0;font-size:22px">🏗️ 架构笔记</h1></a><button id="t">🌓</button></header>
+<div id="app">加载中…</div></main>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11/lib/highlight.min.js"></script>
+<script>
+const app=document.getElementById("app"),root=document.documentElement;
+const setTheme=d=>{root.dataset.theme=d;document.getElementById("hl").href=`https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github${d==="dark"?"-dark":""}.min.css`;localStorage.theme=d};
+setTheme(localStorage.theme||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"));
+document.getElementById("t").onclick=()=>setTheme(root.dataset.theme==="dark"?"light":"dark");
+const esc=s=>s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+async function route(){
+  const notes=await (await fetch("notes.json")).json(); const h=location.hash.slice(2);
+  if(!h){app.innerHTML="<p style='color:var(--mut)'>每天一个真实场景：判断、取舍、翻车点，附可运行 Demo。</p>"+
+    notes.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(n=>`<a class="card" href="#/${n.slug}"><div class="date">${n.date}</div><b>${n.title}</b><div>${n.tags.map(t=>`<span class="tag">${t}</span>`).join("")}</div></a>`).join("");return;}
+  const [slug,file]=h.split("/src/"); const d=`demos/${slug}/`;
+  if(file){const code=await (await fetch(d+file)).text();app.innerHTML=`<p><a href="#/${slug}">← 返回笔记</a></p><h3>${file}</h3><pre><code>${esc(code)}</code></pre>`;hljs.highlightAll();return;}
+  const n=notes.find(x=>x.slug===slug); if(!n){app.innerHTML="未找到";return;}
+  const md=await (await fetch(`notes/${slug}.md`)).text();
+  const files=(n.files||["server.ts","index.html","test.sh"]);
+  app.innerHTML=`<p><a href="#/">← 全部笔记</a></p>${marked.parse(md)}<hr><h2>Demo 源码</h2><p class="files">${files.map(f=>`<a href="#/${slug}/src/${f}">📄 ${f}</a>`).join("")}<a href="demos/${slug}.zip">⬇️ 下载 zip</a></p>`;
+  hljs.highlightAll(); scrollTo(0,0);
+}
+addEventListener("hashchange",route);route();
+</script></body></html>
