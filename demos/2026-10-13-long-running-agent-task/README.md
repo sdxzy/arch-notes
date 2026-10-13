@@ -240,7 +240,7 @@ try {
 - 可选：清扫器同时把超过 `deadline_at` 的 running 任务也标成 failed（多一层保险）。
 - 原则：**清扫器只改数据库状态，不去杀进程**。真正停下 worker，靠的是下面这条规则。
 
-### 8.8 条件更新（CAS）：为什么能防住「僵尸复活」
+### 8.8 翻车防护：条件更新（CAS）为什么能防住「僵尸复活」
 场景：worker A 卡了 90 秒，清扫器已经把任务标成 failed，前端也显示了失败，用户点了重试，新的 worker B 开始跑。这时 A 醒过来，准备写「第 3 步完成」。
 
 如果 A 执行的是 `UPDATE ... WHERE id = $1`，就会覆盖 B 的状态，甚至把 failed 改回 succeeded。正确做法是**「比较并交换」(Compare-And-Swap)**：只有状态仍是我预期的值，这次写入才生效。
@@ -269,7 +269,75 @@ if (r.rowCount === 0) {            // 状态已被别人改了：我已不再是
 - 清扫器部署了几个实例？除了改状态，它还有没有别的副作用？
 - **清扫器自己挂了，多久会有人知道？** 任务到了截止时间，是任务自己收尾，还是等清扫器来处理？
 
-## 9. 运行 Demo
+## 9. 最佳实践与成熟框架
+
+### 9.1 Review 清单：长程任务 7 条最佳实践
+1. **接口立即返回 + 队列/worker 执行**：接口只负责建任务、返回 202 和 taskId，不在请求里干活。
+2. **按代价去重**：便宜的操作，用业务唯一键 + 唯一索引去重就够了；昂贵或有副作用的操作，再加幂等键。
+3. **状态机**：`queued → running → succeeded / failed / cancelled`，所有状态转换都用条件更新。
+4. **分步 checkpoint + 重试**：只重试失败的那一步，用指数退避，并设重试上限。
+5. **三层保险**：单步超时、任务整体截止时间、心跳 + 清扫器。
+6. **进度通道**：SSE 为主，轮询兜底，重连时先拉一次快照对齐状态。
+7. **可观测**：盯任务耗时、失败率、僵尸任务数、队列积压，并配好告警。
+
+### 9.2 BullMQ（Node + Redis）
+- `jobId` 去重：同一个 jobId 不会重复入队，可以直接用业务唯一键。
+- `attempts` / `backoff`：自带重试和退避。
+- `job.updateProgress()` 上报进度，`QueueEvents` 监听后转发成 SSE。
+- 内置 **stalled job 检测**：worker 的锁过期，任务会被重新处理。这相当于心跳 + 清扫器。
+- **仍需自己写**：单步超时、分步 checkpoint（可以存在 `job.data` 或 DB 里）。
+```ts
+import { Queue, Worker, QueueEvents } from "bullmq";
+const connection = { host: "localhost", port: 6379 };
+const queue = new Queue("report", { connection });
+
+// 入队：jobId = 业务唯一键，重复调用不会产生第二个任务
+await queue.add("weekly", { userId: "u123", week: "2026-W42" },
+  { jobId: "u123:2026-W42", attempts: 3, backoff: { type: "exponential", delay: 2000 } });
+
+new Worker("report", async job => {
+  const steps = ["git", "calendar", "generate"];
+  const done: Record<string, unknown> = job.data.checkpoints ?? {};
+  for (const [i, s] of steps.entries()) {
+    if (done[s]) continue;                                    // checkpoint：跳过已完成的步骤
+    done[s] = await runStep(s, AbortSignal.timeout(60_000));  // 单步超时
+    await job.updateData({ ...job.data, checkpoints: done });
+    await job.updateProgress(Math.round(((i + 1) / steps.length) * 100));
+  }
+  return done.generate;
+}, { connection });
+
+// 进度转发：QueueEvents → 推给对应任务的 SSE 订阅者
+new QueueEvents("report", { connection })
+  .on("progress", ({ jobId, data }) => sse.push(jobId, { progress: data }));
+```
+
+### 9.3 Temporal（持久化工作流）
+- 每一步写成 **Activity**，执行结果由框架**自动持久化**。进程崩了，换台机器从断点继续，checkpoint 不用自己写。
+- 每个 Activity 都能配 `startToCloseTimeout`（单步超时）、`retry`（重试策略）、`heartbeatTimeout`（心跳）。
+- **Workflow ID 就是幂等键**：用同一个 ID 启动第二次会被拒绝。
+- 适合「等人审批几天」这类超长流程，可以用 `sleep` 和 signal。
+- 代价：要部署和运维 Temporal 集群（或用 Temporal Cloud），学习曲线也陡（workflow 代码必须是确定性的）。
+
+### 9.4 Inngest / Trigger.dev（Serverless 友好）
+- `step.run("读取 Git", () => ...)`：每一步自动持久化、自动重试，函数可以分多次调用执行完。
+- 不用自己维护常驻 worker，适合 Vercel 这类 Serverless 部署。
+
+### 9.5 Python：Celery
+- `acks_late=True`：任务执行完才确认，worker 崩了任务会重新投递。
+- 配合 broker 的 `visibility_timeout`，相当于心跳超时；任务本身要能安全地重复执行（幂等）。
+
+### 9.6 取舍：怎么选
+| 场景 | 选择 |
+|---|---|
+| 步骤简单、已经有 Redis、Node 技术栈 | **BullMQ** |
+| 流程复杂、超长、要等人工审批、对可靠性要求高 | **Temporal** |
+| Serverless 部署、不想运维基础设施 | **Inngest / Trigger.dev** |
+| Python 技术栈 | **Celery**（复杂流程同样可以考虑 Temporal） |
+
+今天手写的 demo 是为了理解原理。生产环境优先选框架，再按 9.1 的清单逐条检查框架**没帮你做**的部分。
+
+## 10. 运行 Demo
 需要 Node 18+，**零依赖**（只用 `node:http`），通过 `tsx` 运行 TypeScript：
 ```bash
 npx tsx server.ts                 # 打开 http://localhost:3000
