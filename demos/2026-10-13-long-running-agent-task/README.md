@@ -133,7 +133,71 @@ RETURNING id;
 - 幂等键在什么时候生成、什么时候轮换？刷新页面或开多个标签页时，靠哪一层兜底？
 - 回调或消息重复到达时，状态更新是不是条件更新？
 
-## 8. 运行 Demo
+## 8. 深入讨论：心跳与清扫器怎么实现
+
+> 来自当晚的追问：心跳具体怎么打？清扫器跑在哪？多实例会不会打架？
+
+### 8.1 心跳：一个字段加一个定时器
+任务表加一列 `heartbeat_at`。worker 开始执行时启动定时器，每 10 秒更新一次，在 `finally` 里清掉：
+```ts
+async function runTask(taskId: string) {
+  const beat = setInterval(() =>
+    db.query(`UPDATE tasks SET heartbeat_at = now() WHERE id = $1 AND status = 'running'`, [taskId]), 10_000);
+  try {
+    await doSteps(taskId);
+  } finally {
+    clearInterval(beat);
+  }
+}
+```
+另一种写法是**按步骤打心跳**，和进度写入合并成一条 UPDATE：`SET step = $2, heartbeat_at = now()`。
+
+为什么可靠：**进程崩了，定时器自然就停了**，心跳不再更新，清扫器就能发现。这不依赖任何「完成回调」。
+
+### 8.2 翻车：活着，但没在干活
+- [ ] 模型调用卡住（连接挂起、无限等待），`setInterval` 却照常在跳，任务永远「看起来还活着」。解法：**每步设超时**（`AbortSignal.timeout(60_000)`），或者只按步骤打心跳，让心跳反映的是「有进展」，而不只是「进程还在」
+
+### 8.3 清扫器：条件更新 + 跑在 worker 之外
+每 30 秒执行一次：
+```ts
+setInterval(async () => {
+  const { rows } = await db.query(`
+    UPDATE tasks SET status = 'failed', error = 'heartbeat timeout'
+    WHERE status = 'running' AND heartbeat_at < now() - interval '60 seconds'
+    RETURNING id`);
+  for (const r of rows) notify(r.id);   // 通过 SSE / 消息通知前端
+}, 30_000);
+```
+- **必须跑在 worker 之外**：放在 API 服务、独立进程，或者 cron / K8s CronJob 里。worker 自己挂了，谁来扫它？
+- **多实例**：条件 UPDATE 天然安全，同一行只会被一个实例改成功。但如果要做「重新入队」这类副作用，就得加锁，或者用 `SELECT ... FOR UPDATE SKIP LOCKED` 认领：
+```sql
+SELECT id FROM tasks
+WHERE status = 'running' AND heartbeat_at < now() - interval '60 seconds'
+FOR UPDATE SKIP LOCKED LIMIT 50;
+```
+
+### 8.4 取舍：超时阈值怎么定
+阈值取**心跳间隔的 3 到 6 倍**（10 秒心跳 → 30 到 60 秒）。
+- 太短：GC 停顿、网络抖动、DB 慢一下，就误杀活着的任务。
+- 太长：任务真挂了，用户要等很久才看到失败。
+
+### 8.5 翻车：僵尸复活
+- [ ] worker 只是卡了一会儿，被清扫器标成 failed 之后又醒过来，把结果写成 succeeded，甚至重复发了通知。解法：**worker 的每次写入都带 `WHERE status = 'running'`，影响行数为 0 就立刻退出**：
+```ts
+const r = await db.query(
+  `UPDATE tasks SET step = $2, heartbeat_at = now() WHERE id = $1 AND status = 'running'`, [taskId, step]);
+if (r.rowCount === 0) throw new Error("task no longer owned, abort");
+```
+
+### 8.6 生产环境：别自己造轮子
+**BullMQ**（自带 stalled job 检测）、**Temporal**（activity 心跳 + 超时 + 重试一体）、**Celery**（`acks_late` + visibility timeout）都内置了这套机制。手写版适合理解原理，或者只用于很轻量的场景。
+
+### 8.7 Review 追问：心跳与清扫
+- **如果 worker 进程「活着但卡住了」，系统多久能发现？靠什么发现？**
+- 任务被判定失败之后，原来的 worker 醒过来再写结果，会发生什么？
+- 清扫器部署了几个实例？除了改状态，它还有没有别的副作用？
+
+## 9. 运行 Demo
 需要 Node 18+，**零依赖**（只用 `node:http`），通过 `tsx` 运行 TypeScript：
 ```bash
 npx tsx server.ts                 # 打开 http://localhost:3000
