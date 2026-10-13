@@ -189,13 +189,85 @@ const r = await db.query(
 if (r.rowCount === 0) throw new Error("task no longer owned, abort");
 ```
 
-### 8.6 生产环境：别自己造轮子
+### 8.6 取舍：清扫器用 cron / CronJob，还是常驻进程
+**cron / K8s CronJob**：写成**一次性脚本**，里面没有 `setInterval`，跑一次就退出。调度和失败重启都交给平台：
+```ts
+// sweep.ts：每次被调度时执行一次
+const { rows } = await db.query(`
+  UPDATE tasks SET status = 'failed', error = 'heartbeat timeout'
+  WHERE status = 'running' AND heartbeat_at < now() - interval '60 seconds'
+  RETURNING id`);
+console.log(JSON.stringify({ event: "sweep", zombies: rows.length }));  // 打点，供监控告警
+for (const r of rows) await notify(r.id);
+await db.end();
+```
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: task-sweeper }
+spec:
+  schedule: "* * * * *"          # 每分钟一次（cron 最小粒度）
+  concurrencyPolicy: Forbid      # 上一次还没跑完，就不启动新的
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers: [{ name: sweeper, image: my-app, command: ["node", "sweep.js"] }]
+```
+**常驻进程**（自己跑 `setInterval`）：必须交给 **pm2 / systemd / K8s Deployment** 托管，崩了能自动拉起来。
+
+不管哪种，下面两件事都要自己负责：
+- **监控告警**：记录每轮扫到的僵尸任务数，数量突增就告警（通常说明 worker 大面积出问题了）。
+- **防重叠**：`concurrencyPolicy: Forbid`，或者依赖条件 UPDATE 本身的幂等性。
+- [ ] 翻车：清扫器自己挂了，又没人知道，结果所有僵尸任务都没人管。
+
+### 8.7 任务自身超时 vs 清扫器：谁管什么
+- **任务自己执行最大超时**：用 `AbortController` 或 `Promise.race` 设截止时间，到点后把自己标成 failed 并退出。这时状态已经不是 running，清扫器的 `WHERE status = 'running'` 就不会再命中它。
+```ts
+const ac = new AbortController();
+const timer = setTimeout(() => ac.abort(), 5 * 60_000);   // 整个任务最多跑 5 分钟
+try {
+  await doSteps(taskId, { signal: ac.signal });           // 每步把 signal 传给 fetch / 模型 SDK
+} catch (e) {
+  if (ac.signal.aborted)
+    await db.query(`UPDATE tasks SET status = 'failed', error = 'deadline exceeded'
+                    WHERE id = $1 AND status = 'running'`, [taskId]);
+  throw e;
+} finally { clearTimeout(timer); }
+```
+- **清扫器**兜底的是任务**来不及自己收尾**的情况：进程崩溃、机器断电、被 OOM 杀掉。
+- 可选：清扫器同时把超过 `deadline_at` 的 running 任务也标成 failed（多一层保险）。
+- 原则：**清扫器只改数据库状态，不去杀进程**。真正停下 worker，靠的是下面这条规则。
+
+### 8.8 条件更新（CAS）：为什么能防住「僵尸复活」
+场景：worker A 卡了 90 秒，清扫器已经把任务标成 failed，前端也显示了失败，用户点了重试，新的 worker B 开始跑。这时 A 醒过来，准备写「第 3 步完成」。
+
+如果 A 执行的是 `UPDATE ... WHERE id = $1`，就会覆盖 B 的状态，甚至把 failed 改回 succeeded。正确做法是**「比较并交换」(Compare-And-Swap)**：只有状态仍是我预期的值，这次写入才生效。
+```ts
+const r = await db.query(
+  `UPDATE tasks SET step = $2, heartbeat_at = now()
+   WHERE id = $1 AND status = 'running' AND attempt = $3`,   // attempt：重试时 +1，防 A 误写 B 的那一轮
+  [taskId, step, myAttempt]);
+if (r.rowCount === 0) {            // 状态已被别人改了：我已不再是这个任务的主人
+  ac.abort();                      // 停掉手上的工作
+  return;                          // 立刻退出，不写结果、不发通知
+}
+```
+同一个思路在别处也见过：
+- **乐观锁**：`UPDATE ... SET version = version + 1 WHERE id = ? AND version = ?`，影响 0 行就说明有人先改了。
+- **支付回调**（7.4）：`WHERE status = 'pending'`，重复回调只有第一次生效。
+
+说到底都是一件事：**把「检查」和「写入」合成一条原子语句，不要先 SELECT 再 UPDATE。**
+
+### 8.9 生产环境：别自己造轮子
 **BullMQ**（自带 stalled job 检测）、**Temporal**（activity 心跳 + 超时 + 重试一体）、**Celery**（`acks_late` + visibility timeout）都内置了这套机制。手写版适合理解原理，或者只用于很轻量的场景。
 
-### 8.7 Review 追问：心跳与清扫
+### 8.10 Review 追问：心跳与清扫
 - **如果 worker 进程「活着但卡住了」，系统多久能发现？靠什么发现？**
 - 任务被判定失败之后，原来的 worker 醒过来再写结果，会发生什么？
 - 清扫器部署了几个实例？除了改状态，它还有没有别的副作用？
+- **清扫器自己挂了，多久会有人知道？** 任务到了截止时间，是任务自己收尾，还是等清扫器来处理？
 
 ## 9. 运行 Demo
 需要 Node 18+，**零依赖**（只用 `node:http`），通过 `tsx` 运行 TypeScript：
