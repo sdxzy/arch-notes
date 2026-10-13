@@ -1,1 +1,14 @@
-[{"slug":"2026-10-13-long-running-agent-task","date":"2026-10-13","title":"长程 Agent 任务设计：AI 写周报","tags":["长任务","幂等","可靠性","SSE"]}]
+[
+  {
+    "slug": "2026-10-13-long-running-agent-task",
+    "date": "2026-10-13",
+    "title": "长程 Agent 任务设计：AI 写周报",
+    "tags": [
+      "长任务",
+      "幂等",
+      "可靠性",
+      "SSE"
+    ],
+    "summary": "点击生成周报要跑 2 分钟：幂等键、心跳与清扫器、分步 checkpoint，以及 SSE 与轮询该怎么选。"
+  }
+]

@@ -1,39 +1,125 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>架构笔记</title>
+<title>架构笔记 · Architecture Notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" id="hl" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
+<script>document.documentElement.dataset.theme=localStorage.theme||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light")</script>
 <style>
-:root{--bg:#fff;--fg:#1f2328;--mut:#666;--card:#f6f8fa;--acc:#2f81f7;--bd:#d0d7de}
-[data-theme=dark]{--bg:#0d1117;--fg:#e6edf3;--mut:#9198a1;--card:#161b22;--acc:#58a6ff;--bd:#30363d}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.75 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
-main{max-width:780px;margin:0 auto;padding:24px 18px 80px}header{display:flex;justify-content:space-between;align-items:center}
-a{color:var(--acc);text-decoration:none}.card{display:block;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin:14px 0;color:var(--fg)}
-.tag{font-size:12px;background:var(--bd);border-radius:99px;padding:2px 9px;margin-right:6px}.date{color:var(--mut);font-size:14px}
-pre{background:var(--card);border:1px solid var(--bd);border-radius:8px;overflow:auto;padding:12px}code{font-size:14px}
-table{border-collapse:collapse;display:block;overflow:auto}td,th{border:1px solid var(--bd);padding:6px 10px}
-button{background:none;border:1px solid var(--bd);color:var(--fg);border-radius:8px;padding:4px 10px;cursor:pointer}
-.files a{margin-right:14px}
-</style></head><body><main>
-<header><a href="#/"><h1 style="margin:0;font-size:22px">🏗️ 架构笔记</h1></a><button id="t">🌓</button></header>
-<div id="app">加载中…</div></main>
+:root{--bg:#fff;--bg2:#fafafa;--g1:#f2f2f2;--g2:#ebebeb;--bd:#eaeaea;--bd2:#d4d4d4;--mut:#666;--fg:#171717;--fg2:#4d4d4d;
+--blue:#0068d6;--blue-bg:#f0f7ff;--red:#cb2a2f;--red-bg:#fff0f0;--amber:#a35200;--amber-bg:#fff6e5;--green:#297a3a;--green-bg:#effbef;
+--sans:Geist,-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;--mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+--shadow:0 0 0 1px rgba(0,0,0,.08),0 2px 2px rgba(0,0,0,.04),0 8px 16px -4px rgba(0,0,0,.04)}
+[data-theme=dark]{--bg:#0a0a0a;--bg2:#000;--g1:#1a1a1a;--g2:#1f1f1f;--bd:#242424;--bd2:#333;--mut:#a1a1a1;--fg:#ededed;--fg2:#c7c7c7;
+--blue:#52a8ff;--blue-bg:#0a1a2e;--red:#ff6166;--red-bg:#2a1011;--amber:#ffb224;--amber-bg:#271a05;--green:#62c073;--green-bg:#0d2312;
+--shadow:0 0 0 1px rgba(255,255,255,.1),0 8px 16px -4px rgba(0,0,0,.4)}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:80px}
+body{margin:0;background:var(--bg);color:var(--fg);font:15.5px/1.8 var(--sans);-webkit-font-smoothing:antialiased;transition:background .2s,color .2s}
+a{color:inherit;text-decoration:none}
+nav{position:sticky;top:0;z-index:10;height:60px;border-bottom:1px solid var(--bd);background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:saturate(180%) blur(12px)}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}nav .wrap{display:flex;align-items:center;justify-content:space-between;height:100%}
+.brand{display:flex;gap:10px;align-items:center;font-weight:600;letter-spacing:-.01em}.logo{width:22px;height:22px;background:var(--fg);clip-path:polygon(50% 8%,95% 90%,5% 90%)}
+.navr{display:flex;gap:8px;align-items:center}.navr a{color:var(--mut);font-size:14px;padding:4px 10px;border-radius:6px}.navr a:hover{color:var(--fg);background:var(--g1)}
+.btn{height:32px;width:32px;display:grid;place-items:center;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;transition:.15s}.btn:hover{background:var(--g1);border-color:var(--bd2)}
+/* hero */
+.hero{position:relative;border-bottom:1px solid var(--bd);overflow:hidden}
+.hero:before{content:"";position:absolute;inset:0;background-image:linear-gradient(var(--bd) 1px,transparent 1px),linear-gradient(90deg,var(--bd) 1px,transparent 1px);background-size:56px 56px;mask-image:radial-gradient(ellipse 70% 80% at 50% 0%,#000 30%,transparent 75%);opacity:.7}
+.hero .wrap{position:relative;padding:96px 24px 72px;text-align:center}
+.pill{display:inline-flex;gap:8px;align-items:center;font-size:13px;color:var(--fg2);border:1px solid var(--bd);border-radius:99px;padding:3px 12px 3px 6px;background:var(--bg)}
+.pill b{background:var(--fg);color:var(--bg);border-radius:99px;padding:0 8px;font-weight:500;font-size:12px}
+h1.big{font-size:clamp(36px,6vw,60px);line-height:1.1;letter-spacing:-.045em;font-weight:700;margin:22px 0 16px;background:linear-gradient(180deg,var(--fg) 40%,var(--mut));-webkit-background-clip:text;color:transparent}
+.sub{color:var(--mut);font-size:18px;max-width:560px;margin:0 auto}
+.stats{display:flex;justify-content:center;gap:32px;margin-top:32px;font-family:var(--mono);font-size:13px;color:var(--mut)}.stats b{color:var(--fg);font-weight:500}
+/* list */
+.sec{padding:56px 24px 96px}.sech{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:20px}.sech h2{font-size:20px;letter-spacing:-.02em;margin:0}.sech span{color:var(--mut);font-family:var(--mono);font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
+.card{position:relative;display:flex;flex-direction:column;gap:10px;padding:22px;border-radius:12px;background:var(--bg);box-shadow:var(--shadow);transition:transform .2s,box-shadow .2s}
+.card:hover{transform:translateY(-2px);box-shadow:var(--shadow),0 16px 32px -12px rgba(0,0,0,.15)}
+.card .d{font-family:var(--mono);font-size:12.5px;color:var(--mut)}.card h3{margin:0;font-size:18px;letter-spacing:-.02em;line-height:1.4}
+.card p{margin:0;color:var(--mut);font-size:14px;line-height:1.65}.card .arr{position:absolute;right:20px;top:20px;color:var(--mut);transition:transform .2s}.card:hover .arr{transform:translateX(3px);color:var(--fg)}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto}.tag{font-size:12px;font-weight:500;color:var(--fg2);background:var(--g1);border:1px solid var(--bd);border-radius:99px;padding:1px 9px}
+/* article */
+.art{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:64px;padding:48px 24px 120px}
+.back{font-size:14px;color:var(--mut)}.back:hover{color:var(--fg)}
+.meta{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:28px 0 8px;font-family:var(--mono);font-size:13px;color:var(--mut)}
+.prose{max-width:720px}.prose h1{font-size:clamp(28px,4.5vw,40px);line-height:1.2;letter-spacing:-.04em;margin:8px 0 28px}
+.prose h2{font-size:24px;letter-spacing:-.03em;margin:56px 0 16px;padding-top:24px;border-top:1px solid var(--bd)}
+.prose h3{font-size:18px;letter-spacing:-.02em;margin:36px 0 10px}.prose p,.prose li{color:var(--fg2)}.prose strong{color:var(--fg);font-weight:600}
+.prose a{color:var(--blue)}.prose ul,.prose ol{padding-left:22px}.prose li{margin:4px 0}.prose li::marker{color:var(--mut)}
+.prose :not(pre)>code{font-family:var(--mono);font-size:.86em;background:var(--g1);border:1px solid var(--bd);border-radius:5px;padding:1px 5px;color:var(--fg)}
+.prose table{width:100%;border-collapse:collapse;font-size:14px;display:block;overflow-x:auto}.prose th{text-align:left;font-weight:500;color:var(--mut);background:var(--bg2)}
+.prose td,.prose th{border-bottom:1px solid var(--bd);padding:10px 12px;vertical-align:top}
+.prose blockquote{margin:0 0 24px;padding:0;color:var(--mut)}.prose blockquote p{color:var(--mut);margin:0}
+.prose input[type=checkbox]{display:none}.prose li:has(input){list-style:none;margin-left:-22px;padding-left:24px;position:relative}.prose li:has(input):before{content:"✕";position:absolute;left:0;color:var(--red);font-size:12px;top:3px}
+/* callouts */
+.co{border:1px solid;border-radius:12px;padding:14px 18px;margin:20px 0}.co>.ct{display:flex;gap:8px;align-items:center;font-weight:600;font-size:14px;margin-bottom:4px}
+.co>*:last-child{margin-bottom:0}.co ul{margin:6px 0}
+.co.danger{background:var(--red-bg);border-color:color-mix(in srgb,var(--red) 30%,transparent)}.co.danger .ct{color:var(--red)}
+.co.warn{background:var(--amber-bg);border-color:color-mix(in srgb,var(--amber) 30%,transparent)}.co.warn .ct{color:var(--amber)}
+.co.tip{background:var(--green-bg);border-color:color-mix(in srgb,var(--green) 30%,transparent)}.co.tip .ct{color:var(--green)}
+.co.info{background:var(--blue-bg);border-color:color-mix(in srgb,var(--blue) 30%,transparent)}.co.info .ct{color:var(--blue)}
+/* code */
+.code{margin:20px 0;border-radius:12px;overflow:hidden;box-shadow:var(--shadow);background:var(--bg2)}
+.code .bar{display:flex;justify-content:space-between;align-items:center;padding:0 8px 0 16px;height:40px;border-bottom:1px solid var(--bd);font-family:var(--mono);font-size:12.5px;color:var(--mut)}
+.code .bar button{font:inherit;font-size:12px;background:none;border:1px solid transparent;color:var(--mut);border-radius:6px;padding:2px 8px;cursor:pointer}.code .bar button:hover{border-color:var(--bd);color:var(--fg)}
+.code pre{margin:0;padding:16px;overflow-x:auto;font-size:13.5px;line-height:1.7}.code code{font-family:var(--mono);background:none!important;padding:0!important}
+/* toc */
+.toc{position:sticky;top:92px;align-self:start;font-size:13.5px;max-height:calc(100vh - 120px);overflow:auto}
+.toc .h{font-weight:500;margin-bottom:10px;font-size:13px}.toc a{display:block;color:var(--mut);padding:4px 0 4px 12px;border-left:1px solid var(--bd);line-height:1.5;transition:.15s}
+.toc a.l3{padding-left:24px;font-size:13px}.toc a:hover{color:var(--fg)}.toc a.on{color:var(--fg);border-left-color:var(--fg)}
+.files{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}.files a{display:flex;gap:8px;align-items:center;padding:12px 14px;border-radius:10px;box-shadow:var(--shadow);font-family:var(--mono);font-size:13px;color:var(--fg)!important;transition:transform .15s}.files a:hover{transform:translateY(-1px)}
+footer{border-top:1px solid var(--bd);padding:28px 0;color:var(--mut);font-size:13px}
+.fade{animation:fade .45s cubic-bezier(.2,.7,.2,1) both}@keyframes fade{from{opacity:0;transform:translateY(8px)}}
+.grid .card{animation:fade .5s both}.grid .card:nth-child(2){animation-delay:.06s}.grid .card:nth-child(3){animation-delay:.12s}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+@media (max-width:900px){.art{grid-template-columns:minmax(0,1fr);gap:0}.prose{min-width:0}.toc{display:none}.hero .wrap{padding:64px 20px 48px}.wrap{padding:0 18px}.sec,.art{padding-left:18px;padding-right:18px}.grid{grid-template-columns:1fr}.stats{gap:18px}.navr a.hide{display:none}}
+</style></head><body>
+<nav><div class="wrap"><a class="brand" href="#/"><span class="logo"></span>架构笔记</a>
+<div class="navr"><a class="hide" href="#/">全部笔记</a><a class="hide" href="https://github.com/sdxzy/arch-notes" target="_blank">GitHub</a><button class="btn" id="t" aria-label="切换主题">◐</button></div></div></nav>
+<div id="app"></div>
+<footer><div class="wrap">每天一个场景 · 判断、取舍、翻车点 · 附可运行 Demo</div></footer>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/lib/highlight.min.js"></script>
 <script>
-const app=document.getElementById("app"),root=document.documentElement;
-const setTheme=d=>{root.dataset.theme=d;document.getElementById("hl").href=`https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github${d==="dark"?"-dark":""}.min.css`;localStorage.theme=d};
-setTheme(localStorage.theme||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"));
-document.getElementById("t").onclick=()=>setTheme(root.dataset.theme==="dark"?"light":"dark");
+const app=document.getElementById("app"),root=document.documentElement,hl=document.getElementById("hl");
+const setTheme=d=>{root.dataset.theme=d;hl.href=`https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github${d==="dark"?"-dark":""}.min.css`;localStorage.theme=d};
+setTheme(root.dataset.theme);document.getElementById("t").onclick=()=>setTheme(root.dataset.theme==="dark"?"light":"dark");
 const esc=s=>s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const codeBlock=(code,lang,name)=>`<div class="code"><div class="bar"><span>${name||lang||"text"}</span><button onclick="navigator.clipboard.writeText(this.closest('.code').querySelector('code').innerText);this.textContent='已复制';setTimeout(()=>this.textContent='复制',1200)">复制</button></div><pre><code class="language-${lang||"plaintext"}">${esc(code)}</code></pre></div>`;
+marked.use({renderer:{code(c,l){if(typeof c==="object"){l=c.lang;c=c.text}return codeBlock(c,l)}}});
+let notesCache;const getNotes=async()=>notesCache??=await (await fetch("notes.json")).json();
+// 按标题关键字把章节包成 callout（约定：标题含「Bad Case/翻车」「取舍/推送 vs」「Review/审」）
+function callouts(el){
+  const rules=[[/bad case|翻车/i,"danger","⚠ 翻车清单"],[/review|审/i,"tip","✓ Review 追问"],[/vs|取舍/i,"warn","⇄ 取舍判断"]];
+  el.querySelectorAll("h2,h3").forEach(h=>{const r=rules.find(([re])=>re.test(h.textContent));if(!r||/关键判断/.test(h.textContent))return;
+    const box=document.createElement("div");box.className="co "+r[1];box.innerHTML=`<div class="ct">${r[2]}</div>`;
+    let n=h.nextElementSibling;const lvl=h.tagName;while(n&&!(/^H[23]$/.test(n.tagName)&&n.tagName<=lvl)){const nx=n.nextElementSibling;box.appendChild(n);n=nx}h.after(box)});
+  el.querySelectorAll("blockquote").forEach(b=>{if(b.closest(".co"))return;b.outerHTML=`<div class="co info">${b.innerHTML}</div>`});
+  el.querySelectorAll(".co p,.co li").forEach(p=>{if(/^原则|^边界/.test(p.textContent))p.closest("li")});
+}
+let spy;
 async function route(){
-  const notes=await (await fetch("notes.json")).json(); const h=location.hash.slice(2);
-  if(!h){app.innerHTML="<p style='color:var(--mut)'>每天一个真实场景：判断、取舍、翻车点，附可运行 Demo。</p>"+
-    notes.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(n=>`<a class="card" href="#/${n.slug}"><div class="date">${n.date}</div><b>${n.title}</b><div>${n.tags.map(t=>`<span class="tag">${t}</span>`).join("")}</div></a>`).join("");return;}
-  const [slug,file]=h.split("/src/"); const d=`demos/${slug}/`;
-  if(file){const code=await (await fetch(d+file)).text();app.innerHTML=`<p><a href="#/${slug}">← 返回笔记</a></p><h3>${file}</h3><pre><code>${esc(code)}</code></pre>`;hljs.highlightAll();return;}
-  const n=notes.find(x=>x.slug===slug); if(!n){app.innerHTML="未找到";return;}
-  const md=await (await fetch(`notes/${slug}.md`)).text();
-  const files=(n.files||["server.ts","index.html","test.sh"]);
-  app.innerHTML=`<p><a href="#/">← 全部笔记</a></p>${marked.parse(md)}<hr><h2>Demo 源码</h2><p class="files">${files.map(f=>`<a href="#/${slug}/src/${f}">📄 ${f}</a>`).join("")}<a href="demos/${slug}.zip">⬇️ 下载 zip</a></p>`;
-  hljs.highlightAll(); scrollTo(0,0);
+  const notes=await getNotes();const h=decodeURIComponent(location.hash.slice(2));if(spy)spy.disconnect();
+  if(!h){const s=notes.slice().sort((a,b)=>b.date.localeCompare(a.date));
+    app.innerHTML=`<section class="hero"><div class="wrap fade"><span class="pill"><b>每日</b>软件工程 × 系统架构 × Agent</span>
+    <h1 class="big">练判断力，<br>而不是背概念。</h1><p class="sub">每天一个真实场景：能力边界、取舍、翻车案例，以及一个能跑起来的 Demo。为设计与 Review AI 方案而写。</p>
+    <div class="stats"><span><b>${s.length}</b> 篇笔记</span><span><b>${s.length}</b> 个 Demo</span><span>最近 <b>${s[0]?.date??"-"}</b></span></div></div></section>
+    <section class="wrap sec"><div class="sech"><h2>全部笔记</h2><span>${s.length} entries</span></div><div class="grid">${s.map(n=>`<a class="card" href="#/${n.slug}"><span class="arr">→</span><span class="d">${n.date}</span><h3>${n.title}</h3>${n.summary?`<p>${n.summary}</p>`:""}<div class="tags">${n.tags.map(t=>`<span class="tag">${t}</span>`).join("")}</div></a>`).join("")}</div></section>`;
+    scrollTo(0,0);return}
+  const [slug,file]=h.split("/src/"),d=`demos/${slug}/`,n=notes.find(x=>x.slug===slug);
+  if(!n){app.innerHTML=`<div class="wrap sec">未找到这篇笔记。<a class="back" href="#/">← 返回</a></div>`;return}
+  if(file){const code=await (await fetch(d+file)).text();const lang={ts:"typescript",html:"xml",sh:"bash",md:"markdown"}[file.split(".").pop()];
+    app.innerHTML=`<div class="wrap sec fade"><a class="back" href="#/${slug}">← ${n.title}</a><h1 style="font-size:28px;letter-spacing:-.03em;margin:24px 0 4px;font-family:var(--mono)">${file}</h1><p style="color:var(--mut);margin:0 0 8px">Demo 源码 · <a href="${d+file}" download style="color:var(--blue)">下载此文件</a></p>${codeBlock(code,lang,file)}</div>`;hljs.highlightAll();scrollTo(0,0);return}
+  const md=(await (await fetch(`notes/${slug}.md`)).text()).replace(/^# .*\n/,"");const files=n.files||["server.ts","index.html","test.sh"];
+  app.innerHTML=`<div class="wrap art"><article class="prose fade"><a class="back" href="#/">← 全部笔记</a>
+    <div class="meta"><span>${n.date}</span>${n.tags.map(t=>`<span class="tag">${t}</span>`).join("")}</div><h1>${n.title}</h1><div id="md">${marked.parse(md)}</div>
+    <h2 id="demo-src">Demo 源码</h2><div class="files">${files.map(f=>`<a href="#/${slug}/src/${f}">◇ ${f}</a>`).join("")}<a href="demos/${slug}.zip" download>↓ 下载 zip</a></div></article>
+    <aside class="toc"><div class="h">本页目录</div><div id="toc"></div></aside></div>`;
+  const body=document.getElementById("md");const hs=[...app.querySelectorAll(".prose h2,.prose h3")];
+  body.querySelector("blockquote:first-child")?.remove();hs.forEach((x,i)=>x.id||(x.id="s"+i));callouts(body);
+  document.getElementById("toc").innerHTML=hs.map(x=>`<a class="${x.tagName==="H3"?"l3":""}" href="javascript:void 0" data-id="${x.id}">${x.textContent}</a>`).join("");
+  document.querySelectorAll("#toc a").forEach(a=>a.onclick=()=>document.getElementById(a.dataset.id).scrollIntoView());
+  spy=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){document.querySelectorAll("#toc a").forEach(a=>a.classList.toggle("on",a.dataset.id===e.target.id))}}),{rootMargin:"-80px 0px -70% 0px"});
+  hs.forEach(x=>spy.observe(x));hljs.highlightAll();scrollTo(0,0);
 }
 addEventListener("hashchange",route);route();
 </script></body></html>
