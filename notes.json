@@ -1,5 +1,23 @@
 [
   {
+    "slug": "2026-10-16-llm-rate-limit-capacity",
+    "date": "2026-10-16",
+    "title": "LLM 容量估算与限流：周一高峰的 AI 代码评审",
+    "tags": [
+      "容量估算",
+      "限流",
+      "令牌桶",
+      "重试"
+    ],
+    "summary": "300 个 PR 涌进共享的 2M TPM 额度：先撞 TPM 而不是 RPM，用双令牌桶 + 优先级 + 退避保住客服 Bot，再用裁剪上下文和缓存把排队压下来。",
+    "files": [
+      "limiter.ts",
+      "sim.ts",
+      "test.sh",
+      "README.md"
+    ]
+  },
+  {
     "slug": "2026-10-13-long-running-agent-task",
     "date": "2026-10-13",
     "title": "长程 Agent 任务设计：AI 写周报",
