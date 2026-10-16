@@ -255,6 +255,224 @@ return ok and 1 or 0
 
 </details>
 
+### 6.7 源码拆解：rate-limiter-flexible 与 Bottleneck 内部怎么实现
+
+> 以下内容都对照了 npm 上的真实源码：`rate-limiter-flexible@11.2.2`、`bottleneck@2.19.5`（`npm pack` 下载后逐个文件读过）。路径都是相对包根目录的。
+
+#### A. rate-limiter-flexible：本质是「按 key 的固定窗口计数器」
+
+**类层次**（`lib/`）：
+
+```text
+RateLimiterAbstract                 points / duration / blockDuration / execEvenly / keyPrefix
+├── RateLimiterMemory               进程内 Map + setTimeout 过期
+└── RateLimiterInsuredAbstract      insuranceLimiter：存储挂了就降级到备用限流器
+    └── RateLimiterStoreAbstract    通用流程：_consume → _upsert → _afterConsume
+        ├── RateLimiterRedis        子类只实现 _upsert / _get / _delete
+        ├── RateLimiterPostgres / Mongo / MySQL / Dynamo / Valkey ...
+组合器：BurstyRateLimiter（主限流 + 突发限流）、RateLimiterUnion（多个一起扣）、
+       RateLimiterQueue（拿不到就排队等，类似 removeTokens）
+```
+
+**算法：不是令牌桶，也不是滑动窗口，是固定窗口。** 每个 key 存一个整数"已消耗点数"，TTL = `duration`。窗口从这个 key **第一次被消耗**时开始计时（不是对齐整分钟），TTL 到期 key 被删，计数归零。Redis 版的核心 Lua（`lib/RateLimiterRedis.js`）：
+
+```lua
+redis.call('set', KEYS[1], 0, 'EX', ARGV[2], 'NX')   -- ① key 不存在才创建：值 0，过期 duration 秒
+local consumed = redis.call('incrby', KEYS[1], ARGV[1]) -- ② 加上本次的 points
+local ttl = redis.call('pttl', KEYS[1])                 -- ③ 读剩余毫秒数
+if ttl == -1 then                                       -- ④ 兜底：key 没有过期时间就补上
+  redis.call('expire', KEYS[1], ARGV[2])
+  ttl = 1000 * ARGV[2]
+end
+return {consumed, ttl}
+```
+
+一条 Lua 脚本在 Redis 里是**单线程原子执行**的，所以"创建 + 累加 + 读 TTL"中间不会被别的客户端插队，多台机器共享一个计数也不会算错。注意判断"超没超"**不在 Lua 里**，而是在 JS 里（`lib/RateLimiterStoreAbstract.js` 的 `_afterConsume`）：
+
+```js
+} else if (res.consumedPoints > this.points) {
+  // Block only first time when consumed more than points
+  if (this.blockDuration > 0 && res.consumedPoints <= (this.points + changedPoints)) {
+    res.msBeforeNext = this.msBlockDuration;
+    blockPromise = this._block(rlKey, res.consumedPoints, this.msBlockDuration, options);
+  }
+  ...reject(res)
+} else if (this.execEvenly && ...) {
+  let delay = Math.ceil(res.msBeforeNext / (res.remainingPoints + 2));
+  setTimeout(resolve, delay, res);
+}
+```
+
+**几个参数的真实含义：**
+
+- `points` / `duration`：每个窗口（秒）最多消耗多少点；`consume(key, n)` 一次扣 n 点（**必须是整数**，`_upsert` 里遇到小数直接抛错）。
+- `blockDuration`：第一次超额时，用 `SET key value EX blockDuration`（`forceExpire` 分支）把 key 的过期时间**延长**到封禁时长，这段时间里任何 consume 都超额。
+- `execEvenly`：不拒绝，而是 `setTimeout` 延迟 resolve，延迟 = 剩余窗口时间 ÷ (剩余点数 + 2)，把窗口内的请求摊平。**延迟发生在调用方进程里**，点数在 Redis 里已经扣了。
+- `inMemoryBlockOnConsumed`：超额后在本进程内存里记一笔"封禁到 X 时刻"，之后直接拒绝、不再打 Redis，防止被打爆时 Redis 也跟着扛流量。
+
+**consume / reward / penalty 到 Redis 的映射**（都在 `RateLimiterStoreAbstract.js`）：
+
+| API | 实际调用 | Redis 操作 |
+|---|---|---|
+| `consume(key, n)` | `_upsert(rlKey, n)` | 上面那段 Lua：`SET NX EX` → `INCRBY n` → `PTTL` |
+| `penalty(key, n)` | `_upsert(rlKey, n)` | 同一段 Lua，只是**不做超额判断、不会 reject** |
+| `reward(key, n)` | `_upsert(rlKey, -n)` | 同一段 Lua，`INCRBY -n` |
+| `block(key, sec)` / `set` | `_upsert(..., forceExpire=true)` | `MULTI: SET key v EX sec; PTTL` |
+| `get` | `_get` | `MULTI: GET; PTTL` |
+
+**设计取舍与坑：**
+
+- **窗口边界突发**：固定窗口最多允许在很短时间内放过 **2 × points**（上个窗口最后一秒 + 新窗口第一秒）。对 LLM 的 60 秒滑动窗口限额，这意味着你按 1.4M TPM 配，供应商那边仍可能看到接近 2.8M。缓解：`points` 配低一点 + `duration` 改短（比如 10 秒一窗、每窗 1/6 额度），或用 `BurstyRateLimiter`。
+- **被拒绝的请求也扣了点数**：Lua 先 `INCRBY` 再由 JS 判断，超额的请求也已经把计数推高了。所以持续重试的客户端会一直让自己处于超额状态，直到窗口过期。
+- **TTL 是秒级的**：`secDuration = Math.floor(msDuration / 1000)`，Redis 版不支持亚秒级窗口；`duration: 0` 走 `INCRBY + PTTL` 分支，key **永不过期**。
+- **时钟**：窗口靠 Redis 的 TTL 推进，用的是 Redis 自己的时钟，不受应用机器时钟偏差影响，这是它比"客户端传 now"的方案稳的地方。
+- **用作 TPM 的方式**：`points = 1_400_000, duration = 60`，`consume(key, estTokens)` 预扣、完成后 `reward(key, est - actual)` 退回。但它不会排队——拿不到就 reject，需要自己写等待重试，或包一层 `RateLimiterQueue`。
+- **维护状态**：活跃维护，11.2.2 发布于 2026-10，支持的存储一直在加。
+
+```text
+consume(key, n)
+   │
+   ├─ 内存里被 inMemoryBlock 了？ ── 是 ──► 直接 reject（不打 Redis）
+   ▼
+Redis Lua：SET NX EX → INCRBY n → PTTL   ← 原子
+   ▼
+consumed > points ?
+   ├─ 是 ─► 首次超额且 blockDuration>0 → SET EX blockDuration → reject(msBeforeNext)
+   ├─ 否且 execEvenly ─► setTimeout(delay) 后 resolve
+   └─ 否 ─► resolve(remainingPoints, msBeforeNext)
+```
+
+#### B. Bottleneck：本质是「任务调度器」，限流只是它的一个条件
+
+Bottleneck 不只是计数，它**接管你的函数调用**：`limiter.schedule(fn)` 把任务放进它的队列，条件满足时才替你执行。
+
+**核心抽象**（`src/*.coffee`，`lib/` 是编译产物）：
+
+- `Bottleneck`：对外 API、队列、调度循环（`_receive → _addToQueue → _drainAll → _drainOne → _run → _free`）；
+- `Queues` + `DLList`：**10 个优先级的双向链表**（`NUM_PRIORITIES = 10`，`DEFAULT_PRIORITY = 5`，数字越小越优先）；
+- `Job` + `States`：任务状态机；
+- `LocalDatastore` / `RedisDatastore`：计数和条件判断放在哪（本地内存 or Redis Lua）；
+- `Group`：按 key 自动建一组 limiter（比如每个用户一个）；`Batcher`：攒批。
+
+**任务生命周期**（`src/Job.coffee`、`src/States.coffee`）：
+
+```text
+schedule(fn)
+  │ doReceive()           RECEIVED   已收到，排队前还要过 __submit__（highWater / BLOCK 检查）
+  ▼
+_addToQueue ── __submit__ ─► 被 BLOCK 策略挡住 → doDrop
+  │ doQueue()             QUEUED     进入对应优先级链表
+  ▼
+_drainOne ── __register__ 成功（capacity 够）
+  │ doRun()               RUNNING    已占用额度，setTimeout(wait) 等 minTime 间隔
+  ▼
+  │ doExecute()           EXECUTING  真正执行你的函数
+  ▼
+成功/失败 ─ "failed" 事件返回毫秒数？─ 是 ─► retryCount++，回到 RUNNING 重新等待
+  │                                   否
+  ▼ doDone() + _free()    DONE（仅 trackDoneStatus 时保留）→ 释放并发，再次 _drainAll
+```
+
+**调度循环**（`src/Bottleneck.coffee`）：
+
+```coffee
+_drainOne: (capacity) ->
+  @_registerLock.schedule =>
+    if @queued() == 0 then return @Promise.resolve null
+    queue = @_queues.getFirst()                 # 优先级最高的非空链表
+    { options, args } = next = queue.first()
+    if capacity? and options.weight > capacity then return @Promise.resolve null
+    @_store.__register__ index, options.weight, options.expiration
+    .then ({ success, wait, reservoir }) =>
+      if success
+        queue.shift()
+        @_run index, next, wait                 # setTimeout(wait) 后执行
+```
+
+`_drainAll` 递归调用 `_drainOne` 直到拿不到额度；每次有任务完成（`_free`）、reservoir 被刷新、设置被修改时都会再触发一次 `_drainAll`。没有轮询，全靠事件驱动。
+
+**各参数的真实实现**（`src/LocalDatastore.coffee`）：
+
+```coffee
+computeCapacity: ->
+  { maxConcurrent, reservoir } = @storeOptions
+  if maxConcurrent? and reservoir? then Math.min((maxConcurrent - @_running), reservoir)
+  ...
+__register__: (index, weight, expiration) ->
+  if @conditionsCheck weight
+    @_running += weight
+    if @storeOptions.reservoir? then @storeOptions.reservoir -= weight
+    wait = Math.max @_nextRequest - now, 0
+    @_nextRequest = now + wait + @storeOptions.minTime
+```
+
+- `maxConcurrent`：同时 RUNNING+EXECUTING 的 **weight 之和**上限，`_free` 时归还；
+- `minTime`：两次**启动**之间至少间隔多少毫秒，通过 `_nextRequest` 时间戳实现，返回的 `wait` 就是要 `setTimeout` 的时长；
+- `reservoir`：一个**只减不还**的计数器，任务启动时扣 `weight`，完成后不退。两种补充方式：
+  - `reservoirRefreshInterval + reservoirRefreshAmount`：每隔 N 毫秒**直接重置**为固定值 → 等价于**固定窗口**；
+  - `reservoirIncreaseInterval + reservoirIncreaseAmount (+ Maximum)`：每隔 N 毫秒**加**一点、有上限 → 等价于**令牌桶**；
+  - 本地版靠 `heartbeatInterval`（默认 250ms）的 `setInterval` 检查是否该补充；
+- `highWater` + `strategy`：队列长度达到 highWater 时怎么办——`LEAK`（默认，丢掉**同级或更低优先级**里最低那一级最老的任务）、`OVERFLOW_PRIORITY`（只丢更低优先级的）、`OVERFLOW`（丢新来的这个）、`BLOCK`（丢掉**全部**排队任务，并在 `penalty` 毫秒内拒绝新任务，默认 `15 × minTime` 或 5 秒）；
+- `priority`：0–9，`Queues.getFirst()` 从 0 号链表开始找第一个非空的。
+
+**Redis/Cluster 版怎么保持原子：** `RedisDatastore` 把每个操作都变成一个 Lua 脚本（`src/redis/*.lua`），每个脚本开头都拼上公共头 `refs.lua`（8 个 key + `now` + `client`）和 `process_tick.lua`。以 `register.lua`（拿额度）为例，一次 `EVALSHA` 里依次做：
+
+1. `process_tick(now)`：
+   - 用 ZSET `job_expirations` 找出已过期的任务，把它们的 weight 从 `running` 里扣掉（回收"跑着跑着死了"的额度）；
+   - 按 `lastReservoirRefresh` / `lastReservoirIncrease` 判断要不要重置或补充 reservoir；
+   - 用 ZSET `client_last_seen` 找出超过 `clientTimeout`（默认 10 秒）没心跳、且没有运行中任务的客户端，删掉它们的记录；
+   - 如果容量变大了，`PUBLISH` 一条 `capacity-priority` 消息，**定向通知运行中任务最少、排队数 > 0 的那个客户端**来取；
+2. `conditions_check(capacity, weight)`：容量够不够；
+3. 够的话：`HINCRBY running +weight`、记录这个任务属于哪个客户端、扣 `reservoir`、算 `wait = max(nextRequest - now, 0)`、写回 `nextRequest = now + wait + minTime`；
+4. 返回 `{true, wait, reservoir}`，客户端拿到后 `setTimeout(wait)` 再执行。
+
+`free.lua` 只做一件事：`ZADD job_expirations 0 index`（把这个任务标成"立刻过期"），再跑一次 `process_tick` 让它被回收——释放和过期共用同一条路径。各实例每 `heartbeatInterval`（Redis 版默认 5 秒）跑一次 `heartbeat.lua` = `process_tick(now, true)`，同时刷新自己的 last_seen。
+
+**设计取舍与坑：**
+
+- **`weight` 同时扣 maxConcurrent 和 reservoir**：想把 weight 设成 token 数来做 TPM，就不能再用 maxConcurrent 限并发了（一个 6000 token 的任务会占满 6000 个"并发位"）。常见做法是两个 limiter 串起来（`limiterA.chain(limiterB)`），一个按次数，一个按 token。
+- **reservoir 不对账**：启动时扣、完成时不退，没有"预估后多退少补"；实际用量只能通过 `incrementReservoir(n)` 手动补回。
+- **队头阻塞**：`_drainOne` 只看最高优先级链表的**第一个**任务，它的 weight 大于剩余容量就整体停住，后面小任务也不会跳过它先跑。
+- **`now` 来自客户端时钟**：`runScript` 传的是 `[Date.now(), clientId, ...]`，Lua 里 `local now = tonumber(ARGV[1])`（`get_time.lua` 虽然存在，但这些脚本没有调用它）。多台机器时钟偏差会直接影响 minTime、reservoir 刷新和过期判断，生产上要保证 NTP 同步。
+- **心跳与 clientTimeout**：进程被 SIGKILL 后它占用的 running 额度不会立刻释放，要等任务的 `expiration` 到期才会被 `process_tick` 回收——**没设 `expiration` 的任务死掉后额度可能永远被占着**。所以 cluster 模式下给每个任务设 `expiration`。另外一个实例超过 clientTimeout 没心跳（比如事件循环被长时间阻塞），会被当成失联，不再收到容量通知。
+- **Redis 版要求所有实例 `id` 相同、设置一致**；`clearDatastore: true` 会在启动时 `DEL` 所有 key，线上滚动发布时会清空正在运行的计数。
+- **维护状态**：最后一个版本 2.19.5 发布于 **2019-08**，此后没有新版本。功能稳定、下载量大，但 Redis 7 / Valkey / 新版 ioredis 的兼容问题和 issue 基本没人处理。新项目要权衡：可以用，但要准备好自己修问题，或者选 BullMQ 的限流、`rate-limiter-flexible` + 自写排队。
+
+#### 怎么选
+
+| | rate-limiter-flexible | Bottleneck |
+|---|---|---|
+| 模型 | 计数器：问"能不能过" | 调度器：帮你"排队并执行" |
+| 算法 | 固定窗口（窗口从首次请求开始） | minTime 间隔 + 并发 + reservoir（重置=固定窗口，增量=令牌桶） |
+| 不够时 | reject，告诉你 msBeforeNext | 进队列等，可按优先级、可丢弃 |
+| 多机原子性 | 一段 3 步 Lua，用 Redis 时钟 | 每个操作一段 Lua + pub/sub 通知 + 心跳，用客户端时钟 |
+| 对账 | `reward` / `penalty` | `incrementReservoir` |
+| 维护 | 活跃 | 2019 年后停更 |
+
+对本篇的 LLM 场景：**排队 + 优先级**这部分 Bottleneck 开箱即用；**TPM 计数 + 对账**用 rate-limiter-flexible 更顺手；两者都不是滑动窗口，要通过"配低一点 + 窗口短一点"来贴合供应商的 60 秒滑动窗口。
+
+**复习题 6.7-1：用 rate-limiter-flexible 配 `points: 1_400_000, duration: 60` 做 TPM 限流，为什么供应商仍可能返回 429？怎么改？**
+
+<details><summary>参考答案</summary>
+
+- 它是**固定窗口**：窗口从 key 第一次被消耗时开始，60 秒后 key 过期归零。上一窗口最后几秒用满 1.4M、新窗口一开始又用满 1.4M，供应商的 60 秒**滑动**窗口里就看到了约 2.8M；
+- 另外，被拒绝的请求也已经 `INCRBY` 了，持续重试会让计数一直偏高（但这不会导致 429，只会让自己被限得更久）；
+- 改法：把窗口切短，比如 `duration: 10, points: 1_400_000 / 6`，边界突发最多变成 1.4M + 233k；或者再配一个 `BurstyRateLimiter`；
+- 同时按 Retry-After 暂停、用 `reward` 按实际用量对账。
+
+</details>
+
+**复习题 6.7-2：在 Redis cluster 模式下用 Bottleneck，`weight` 设成 token 数，`maxConcurrent: 20`，`reservoir` 每分钟刷新成 1_400_000。会出什么问题？进程被 kill 后又会怎样？**
+
+<details><summary>参考答案</summary>
+
+- `weight` 同时计入 `maxConcurrent` 和 `reservoir`：一个 6000 token 的任务就超过 maxConcurrent 20，`__submit__` 直接抛 "Impossible to add a job having a weight of 6000..."。要么去掉 maxConcurrent，要么拆成两个 limiter 用 `chain` 串起来（一个按次数限并发，一个按 token 限 reservoir）；
+- `reservoirRefreshInterval` 是**重置**，等于固定窗口，同样有边界突发；想要平滑就用 `reservoirIncreaseInterval/Amount/Maximum`（令牌桶）；
+- reservoir 启动时扣、完成时不退，要用 `incrementReservoir(est - actual)` 手动对账；
+- 进程被 kill：它占的 running 额度只有在任务 `expiration` 到期后才会被 `process_tick` 回收，**没设 expiration 就一直占着**；它的客户端记录要超过 `clientTimeout`（默认 10 秒）才会被清理。所以要给每个任务设 `expiration`，并保证各机器时钟同步（脚本用的是客户端传入的 `Date.now()`）。
+
+</details>
+
 ## 7. Review 审方案清单 与成熟工具
 
 **审 AI 交出来的限流方案时问：**
