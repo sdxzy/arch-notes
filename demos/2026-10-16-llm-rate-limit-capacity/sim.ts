@@ -9,8 +9,10 @@ function rng(seed: number) { return () => ((seed = (seed * 1664525 + 1013904223)
 
 /** 模拟供应商：60 秒滑动窗口，按"输入 + 实际输出"记账；超限返回 429 + Retry-After */
 class MockVendor {
+  constructor(private skew = 1) {} // skew>1：供应商记账比我们的预估多（分词器差异、隐藏系统提示等）
   log: { t: number; tok: number }[] = []; count429 = 0;
-  call(now: number, tokens: number): { ok: true } | { ok: false; retryAfterMs: number } {
+  call(now: number, raw: number): { ok: true } | { ok: false; retryAfterMs: number } {
+    const tokens = raw * this.skew;
     this.log = this.log.filter(e => e.t > now - 60_000);
     const used = this.log.reduce((s, e) => s + e.tok, 0);
     if (this.log.length + 1 > VENDOR_RPM || used + tokens > VENDOR_TPM) {
@@ -43,8 +45,8 @@ function workload(trimRatio: number) {
 const pct = (xs: number[], p: number) => { if (!xs.length) return 0; const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))]; };
 const min = (ms: number) => (ms / 60_000).toFixed(1) + "min";
 
-function run(mode: "naive" | "limiter", trimRatio = 0) {
-  const r = rng(7); const vendor = new MockVendor(); const budget = new RetryBudget();
+function run(mode: "naive" | "limiter", trimRatio = 0, skew = 1) {
+  const r = rng(7); const vendor = new MockVendor(skew); const budget = new RetryBudget();
   const calls = workload(trimRatio); let next = 0;
   const sched = new Scheduler(new Pool("cs-reserved", VENDOR_RPM * 0.3, VENDOR_TPM * 0.3), new Pool("shared", VENDOR_RPM * 0.7, VENDOR_TPM * 0.7));
   const waiting: Ticket[] = []; const byId = new Map(calls.map(c => [c.id, c]));
@@ -77,8 +79,10 @@ function run(mode: "naive" | "limiter", trimRatio = 0) {
       toSend = waiting.filter(t => t.notBefore <= now && (t.lane === "cs" || naiveInflightReview < NAIVE_POOL) && (t.lane === "cs" || ++naiveInflightReview));
       const s = new Set(toSend); for (let i = waiting.length - 1; i >= 0; i--) if (s.has(waiting[i])) waiting.splice(i, 1);
     }
+    let hit429 = false;
     for (const t of toSend) {
       const c = byId.get(t.id)!;
+      if (hit429) { t.pool?.reconcile(t.estTokens, 0); sched.enqueue(t); continue; } // 本轮已撞墙：剩下的退回队列
       if (c.firstStart === undefined) { c.firstStart = now; waits[c.lane].push(now - t.enqueuedAt); }
       const res = vendor.call(now, c.input + c.output);
       if (res.ok) {
@@ -88,6 +92,7 @@ function run(mode: "naive" | "limiter", trimRatio = 0) {
       }
       if (c.lane === "cs") cs429++;
       t.pool?.reconcile(t.estTokens, 0); // 没被处理，额度退回
+      if (mode === "limiter" && !process.env.NO_PAUSE) { hit429 = true; t.pool?.backoffRate(); sched.shared.pause(now + res.retryAfterMs); if (c.lane === "cs") sched.reserved.pause(now + Math.min(res.retryAfterMs, 2000)); }
       if (mode === "naive" && c.lane !== "cs") naiveInflightReview--;
       c.attempt++;
       const giveUp = mode === "limiter" ? (c.attempt > 4 || !budget.tryRetry()) : c.attempt > (c.lane === "cs" ? 3 : 50);
@@ -102,7 +107,7 @@ function run(mode: "naive" | "limiter", trimRatio = 0) {
   const draftLat = [...prDone.entries()].filter(([p]) => calls.find(c => c.pr === p)!.lane === "draft").map(([, d]) => d.end - d.created);
   const reviewLat = [...prDone.entries()].filter(([p]) => calls.find(c => c.pr === p)!.lane === "review").map(([, d]) => d.end - d.created);
   const peakTpm = Math.max(...tokPerMin.values());
-  const label = mode === "naive" ? "A. 朴素：并发池 64 + 429 后 1 秒立即重试" : trimRatio ? `C. 限流器 + 上下文裁剪 ${trimRatio * 100}%` : "B. 双桶限流器 + 优先级 + 退避/重试预算";
+  const label = mode === "naive" ? "A. 朴素：并发池 64 + 429 后 1 秒立即重试" : skew !== 1 ? `D. 限流器，但供应商记账偏多 ${Math.round((skew - 1) * 100)}%（VENDOR_SKEW）` : trimRatio ? `C. 限流器 + 上下文裁剪 ${trimRatio * 100}%` : "B. 双桶限流器 + 优先级 + 退避/重试预算";
   console.log(`\n=== ${label} ===`);
   console.log(`  供应商 429 次数        : ${vendor.count429}（其中客服 ${cs429}）`);
   console.log(`  最终失败调用           : ${failed}（客服失败 ${csFailed.n}）${mode === "limiter" ? `，重试预算拒绝 ${budget.denied}` : ""}`);
@@ -112,10 +117,12 @@ function run(mode: "naive" | "limiter", trimRatio = 0) {
   console.log(`                    草稿 : ${min(pct(waits.draft, 50))} / ${min(pct(waits.draft, 95))}`);
   console.log(`  PR 完成耗时 p50/p95    : 评审 ${min(pct(reviewLat, 50))} / ${min(pct(reviewLat, 95))}，草稿 ${min(pct(draftLat, 50))} / ${min(pct(draftLat, 95))}`);
   console.log(`  全部 PR 评完           : 第 ${min(Math.max(...[...prDone.values()].map(d => d.end)))}`);
-  return { csFailed: csFailed.n, csP95: pct(waits.cs, 95) };
+  return { csFailed: csFailed.n, csP95: pct(waits.cs, 95), n429: vendor.count429, denied: budget.denied };
 }
 
 run("naive");
 const b = run("limiter");
 run("limiter", 0.4);
+const d = run("limiter", 0, Number(process.env.VENDOR_SKEW ?? 1.15));
 console.log(`\n客服 Bot 未被饿死：${b.csFailed === 0 && b.csP95 < 5000 ? "✅" : "❌"}（限流模式下客服失败 ${b.csFailed} 次，p95 等待 ${(b.csP95 / 1000).toFixed(1)}s）`);
+console.log(`记账偏差场景触发 429 + Retry-After + 退避：${d.n429 > 0 ? "✅" : "❌"}（429 ${d.n429} 次，重试预算拒绝 ${d.denied} 次）`);

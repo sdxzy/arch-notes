@@ -5,9 +5,9 @@ export type Lane = "cs" | "review" | "draft"; // 客服(高/保底) / 评审(普
 export const LANE_PRIORITY: Record<Lane, number> = { cs: 0, review: 1, draft: 2 };
 
 export class TokenBucket {
-  tokens: number;
+  tokens: number; initialRefill: number;
   constructor(public capacity: number, public refillPerMs: number, private last = 0) {
-    this.tokens = capacity;
+    this.tokens = capacity; this.initialRefill = refillPerMs;
   }
   refill(now: number) {
     this.tokens = Math.min(this.capacity, this.tokens + (now - this.last) * this.refillPerMs);
@@ -31,8 +31,17 @@ export class Pool {
     this.rpm = new TokenBucket((rpm * burstSec) / 60, (rpm * safety) / 60000);
     this.tpm = new TokenBucket((tpm * burstSec) / 60, (tpm * safety) / 60000);
   }
-  refill(now: number) { this.rpm.refill(now); this.tpm.refill(now); }
+  pausedUntil = 0;
+  /** 收到 429 + Retry-After：整个池暂停，别让后面的请求继续撞墙 */
+  pause(until: number) { this.pausedUntil = Math.max(this.pausedUntil, until); }
+  /** AIMD：撞了 429 说明我们低估了用量，把补充速率乘性下调（最低 50%） */
+  backoffRate(factor = 0.9) {
+    for (const b of [this.rpm, this.tpm]) b.refillPerMs = Math.max(b.refillPerMs * factor, b.initialRefill * 0.5);
+  }
+  refill(now: number) { this.rpm.refill(now); this.tpm.refill(now); this.now = now; }
+  private now = 0;
   tryAcquire(estTokens: number) {
+    if (this.now < this.pausedUntil) return false;
     if (!this.rpm.canTake(1) || !this.tpm.canTake(estTokens)) return false;
     this.rpm.take(1); this.tpm.take(estTokens); return true;
   }

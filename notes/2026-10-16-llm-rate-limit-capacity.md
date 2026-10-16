@@ -111,6 +111,150 @@ const wait = Math.max(retryAfterMs, Math.random() * Math.min(30_000, 1000 * 2 **
 
 LLM 调用超时，供应商那边可能已经算完并计费了。对纯读/计算的调用，重试只是多花钱、多吃额度（要把这次的 token 也算进桶里）；对会写外部状态的步骤（比如往 PR 发评论），重试前要么带幂等键（`task_id + step`），要么先查一下是不是已经写过。
 
+### 6.5 裁剪上下文具体怎么做
+
+目标：每个专家只看**和它有关、真正改了的**那部分代码。按收益从高到低：
+
+**① 只给 diff，不给整文件。** `git diff -U3 base...head` 只带改动行和上下 3 行，通常比整文件小一个数量级。
+
+**② 过滤掉没人需要评审的文件**（锁文件、压缩产物、快照、生成代码、图片）：
+
+```ts
+const SKIP = /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|go\.sum)$|\.min\.(js|css)$|\.snap$|(^|\/)(dist|build|generated|__generated__)\/|\.(pb|gen)\.\w+$|\.(png|jpe?g|gif|svg|ico|webp|pdf)$/i;
+const files = parseDiff(diff).filter(f => !SKIP.test(f.path));
+```
+
+**③ 按专家路由文件。** 安全专家看 `auth/`、SQL、依赖变更；性能专家看循环、查询、热路径；测试专家看 `*.test.*` 和对应的实现文件。8 个专家不再各自吞下整个 diff。
+
+**④ 符号上下文按需补。** 只有 diff 不够理解时（改了某函数的调用方），再用 AST（tree-sitter / ts-morph）或 `grep -n "function foo"` 补被调函数的签名和几行定义，而不是把整个文件塞进去。
+
+**⑤ token 预算 + 按风险挑选，超出的写摘要：**
+
+```ts
+const BUDGET = 4000; // 每个专家的输入预算
+const risk = (f: FileDiff) =>
+  (/auth|payment|sql|crypto|permission/i.test(f.path) ? 10 : 0) + f.added + f.removed;
+let used = 0; const full: FileDiff[] = [], overflow: FileDiff[] = [];
+for (const f of files.sort((a, b) => risk(b) - risk(a))) {
+  const t = countTokens(f.patch);
+  if (used + t <= BUDGET) { full.push(f); used += t; } else overflow.push(f);
+}
+const context = [
+  ...full.map(f => f.patch),
+  overflow.length ? `其余 ${overflow.length} 个文件摘要：\n` + overflow.map(f => `- ${f.path}: +${f.added}/-${f.removed}`).join("\n") : "",
+].join("\n");
+```
+
+**⑥ 一份便宜模型做的摘要，所有专家共享。** 先用小模型生成"这个 PR 改了什么、为什么改"的 300 token 摘要，8 个专家都带上它，代替各自重复读一遍 PR 描述和整段 diff。
+
+> 一次裁剪的效果，用 demo 的 C 模式可以直观看到：输入少 40%，评审 p95 从 5.4 分钟降到 0.5 分钟。
+
+#### Bad Case：裁过头
+
+裁得太狠，模型看不到被调函数的实现、看不到已有的校验逻辑，就会报"这里没做空值检查"这类**误报**，开发者很快就不再信任评审结果。所以裁剪要当成一次需要评估的改动：抽 50 个历史 PR，用"完整上下文"和"裁剪后"各跑一遍，对比发现的真问题数、误报数和 token 用量，确认质量没降再全量上。
+
+**复习题 6.5：一个 PR 改了 `package-lock.json`（2 万行）、3 个业务文件和 1 张图片，你会怎么构造安全专家的上下文？**
+
+<details><summary>参考答案</summary>
+
+- 锁文件和图片直接过滤；但锁文件里**依赖版本变更**对安全专家有价值，可以只提取"新增/升级了哪些包"这一行级摘要，而不是 2 万行；
+- 3 个业务文件按风险排序（涉及 auth/SQL 的优先），给 `-U3` 的 diff；
+- 如果改动调用了外部函数，用 AST/grep 补被调函数签名；
+- 超出预算的文件只给路径和增删行数摘要，再加一份共享的 PR 摘要；
+- 上线前用历史 PR 抽样对比，确认没有因为裁剪引入误报或漏报。
+
+</details>
+
+### 6.6 令牌桶怎么实现 + 输出怎么预估
+
+完整可运行版本见 demo 的 [`limiter.ts`](https://github.com/sdxzy/arch-notes/blob/main/demos/2026-10-16-llm-rate-limit-capacity/limiter.ts)。核心只有三个动作：**补充（refill）、扣减（take）、对账（settle）**。
+
+```ts
+class TokenBucket {
+  private tokens: number; private last = Date.now();
+  constructor(private capacity: number, private perMinute: number) { this.tokens = capacity; }
+  private refill() {
+    const now = Date.now();
+    this.tokens = Math.min(this.capacity, this.tokens + ((now - this.last) * this.perMinute) / 60_000);
+    this.last = now;
+  }
+  tryTake(n: number) { this.refill(); if (this.tokens < n) return false; this.tokens -= n; return true; }
+  settle(reserved: number, actual: number) { this.tokens = Math.min(this.capacity, this.tokens + reserved - actual); }
+}
+```
+
+**双桶包装：先预留，再按 usage 对账。**
+
+```ts
+const rpm = new TokenBucket(500 * 0.7 / 12, 500 * 0.7 * 0.9);         // 容量 = 5 秒的量，速率留 10% 余量
+const tpm = new TokenBucket(2e6 * 0.7 / 12, 2e6 * 0.7 * 0.9);
+let pausedUntil = 0;
+
+async function callLLM(prompt: string, maxTokens: number) {
+  const reserve = countTokens(prompt) + maxTokens;
+  while (Date.now() < pausedUntil || !(rpm.tryTake(1) && (tpm.tryTake(reserve) || (rpm.settle(1, 0), false))))
+    await sleep(200);                                     // 两个桶都够才放行；TPM 不够就把 RPM 退回
+  try {
+    const res = await llm.chat({ prompt, max_tokens: maxTokens });
+    tpm.settle(reserve, res.usage.prompt_tokens + res.usage.completion_tokens); // 多退少补
+    return res;
+  } catch (e: any) {
+    if (e.status === 429) pausedUntil = Date.now() + Number(e.headers["retry-after"] ?? 1) * 1000; // 整个桶暂停
+    tpm.settle(reserve, 0);  // 未被处理（超时除外：超时可能已计费，应保守地不退）
+    throw e;                 // 交给外层的退避 + 重试预算
+  }
+}
+```
+
+**多台机器：Redis + Lua 原子扣减。** 内存桶只在单进程有效，多实例要把桶放进 Redis，用一段 Lua 让"补充 + 判断 + 扣减"原子执行：
+
+```lua
+-- KEYS[1]=桶 key  ARGV: capacity, perMs, now, n
+local b = redis.call('HMGET', KEYS[1], 'tokens', 'last')
+local cap, rate, now, n = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
+local tokens = math.min(cap, (tonumber(b[1]) or cap) + (now - (tonumber(b[2]) or now)) * rate)
+local ok = tokens >= n
+if ok then tokens = tokens - n end
+redis.call('HSET', KEYS[1], 'tokens', tokens, 'last', now)
+redis.call('PEXPIRE', KEYS[1], 120000)
+return ok and 1 or 0
+```
+
+不想自己写，就用 `rate-limiter-flexible` 的 `RateLimiterRedis`，`consume(key, points)` 里的 points 填 token 数；对账时多退用 `reward(key, points)`、少补用 `penalty(key, points)`。
+
+**客服 Bot 的保底：** 给它单独一个 30% 的桶，自己的用完了再以最高优先级借共享桶；评审和草稿只能用共享桶。demo 里就是 `Pool("cs-reserved")` + `Pool("shared")` + `Scheduler`。
+
+**429 时暂停整个桶：** 一个请求收到 429 + Retry-After，说明整把 key 已经满了，**同一时刻其他请求也会撞墙**。所以要暂停整个桶到 Retry-After 之后，并把补充速率下调（AIMD：每次 429 乘 0.9，平稳后再慢慢恢复），而不是只让这一个请求退避。
+
+#### 输出 token 怎么预估
+
+- **按 `max_tokens` 预留**：它是**硬上限**，供应商不会让输出超过它，所以按它预留，桶永远不会被超支；事后用 `usage` 退回差额。
+- **`max_tokens` 别一律填 4096**：按调用类型统计历史输出的 **P95** 来定（比如安全专家 P95 是 600，就设 700）。填 4096 会让每次预留虚高 3000+，桶里明明有额度却放不进请求，吞吐被白白压低。
+- **约束输出格式**：要求返回 JSON、"最多 5 条问题，每条不超过 2 句"，输出长度就稳定了，P95 也更低。
+- **永远用 `usage` 对账**：不管预估多准，最后都以供应商返回的 `usage` 为准；流式输出要打开 `stream_options.include_usage` 之类的选项拿到最终用量。
+
+#### demo 实测：估算和供应商记账不一致时
+
+供应商的计数可能比你估的多（分词器不同、隐藏系统提示、图片 token 等）。demo 加了 **D 模式**：mock 供应商对每次请求多记 15%（`VENDOR_SKEW=1.15`，可改）。
+
+| D 模式 | 429 | 重试预算拒绝 | 最终失败（客服） | 评审 PR 完成 p95 | 全部评完 |
+|---|---|---|---|---|---|
+| `npx tsx sim.ts`（429 时暂停整桶 + AIMD 降速） | **6** | 0 | **0 (0)** | 11.4min | 21.9min |
+| `NO_PAUSE=1 npx tsx sim.ts`（只退避单个请求） | **1093** | **711** | 711 (90) | 1.1min | 10.3min |
+
+> 看点：只退避单个请求时，后面的请求还在不停撞墙，重试预算很快耗尽，711 次调用直接失败（其中客服 90 次）——重试预算防住了重试风暴，但代价是丢请求。暂停整桶 + 降速后只撞了 6 次 429、零失败，代价是排队变长。生产里还要配合**定期用 `usage` 校准估算系数**，把偏差从根上消掉。
+
+**复习题 6.6：你把所有调用的 `max_tokens` 都设成 4096，实际平均输出 800。会发生什么？怎么改？**
+
+<details><summary>参考答案</summary>
+
+- 不会超限（预留的是硬上限），但每次多预留约 3300 token，在 TPM 桶里"占着不用"：在 1.4M TPM 下，同时能放行的请求数被压到原来的 1/5 左右，排队变长，直到请求完成对账才释放；
+- 改法：按调用类型统计历史输出 P95，`max_tokens` 设成 P95 加一点余量；
+- 用 JSON 格式和"最多 5 条"这类约束让输出更短、更稳定；
+- 每次都用 `usage` 对账，并监控"预留/实际"的比值，偏离太大就调整。
+
+</details>
+
 ## 7. Review 审方案清单 与成熟工具
 
 **审 AI 交出来的限流方案时问：**
@@ -142,6 +286,9 @@ LLM 调用超时，供应商那边可能已经算完并计费了。对纯读/计
 | A 朴素：并发池 64 + 1 秒立即重试 | 34060 | **374** | 0 / 0.1min | 1.5min（但 212 次评审调用最终失败） | 10.2min |
 | B 双桶限流 + 优先级 + 退避 | **0** | **0** | 0.4 / 5.2min | 5.4min | 14.5min |
 | C 限流 + 裁剪 40% 上下文 | 0 | 0 | 0 / 0.3min | 0.5min | 10.2min |
+| D 限流，但供应商多记 15% | 6 | 0 | 1.8 / 11.2min | 11.4min | 21.9min |
+
+D 模式（以及 `NO_PAUSE=1` 的对照）见 6.6 节。
 
 > 看点：A 看起来"快"，是因为它把客服 Bot 的额度抢走了，还丢了几百次调用；B 不丢任何请求、客服排队 p95 为 0 秒，代价是评审排队几分钟、草稿被推到 5 分钟后；C 说明"改几行代码裁上下文"比任何调度技巧都管用。
 
