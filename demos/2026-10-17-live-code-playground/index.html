@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Live Code Playground · arch-notes</title>
+<link rel="preconnect" href="https://esm.sh">
+<link href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css" rel="stylesheet">
+<style>
+:root{--bg:#fff;--bg2:#fafafa;--bd:#eaeaea;--bd2:#d4d4d4;--mut:#666;--fg:#171717;--red:#e5484d;--redbg:#fff0f0;--green:#0a7a3f;--amber:#ad5700;
+--sans:Geist,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;--mono:"Geist Mono",ui-monospace,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#0a0a0a;--bg2:#111;--bd:#242424;--bd2:#333;--mut:#a1a1a1;--fg:#ededed;--redbg:#2a1215}}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 var(--sans);display:flex;flex-direction:column}
+header{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;border-bottom:1px solid var(--bd)}
+header .logo{font-weight:600;letter-spacing:-.02em}header .logo span{color:var(--mut);font-weight:400}
+header a{color:var(--mut);text-decoration:none;font-size:13px}header a:hover{color:var(--fg)}
+.sp{flex:1}
+select,button{font:13px var(--sans);color:var(--fg);background:var(--bg);border:1px solid var(--bd2);border-radius:6px;height:32px;padding:0 10px;cursor:pointer}
+button.pri{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.status{font:12px var(--mono);color:var(--mut);display:flex;align-items:center;gap:6px;min-width:150px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--bd2)}.dot.ok{background:#29a383}.dot.busy{background:#f5a623}.dot.err{background:var(--red)}
+main{flex:1;display:grid;grid-template-columns:1fr 1fr;min-height:0}
+.pane{display:flex;flex-direction:column;min-width:0;min-height:0}.pane+.pane{border-left:1px solid var(--bd)}
+.ph{height:36px;flex:none;display:flex;align-items:center;padding:0 14px;border-bottom:1px solid var(--bd);font:12px var(--mono);color:var(--mut);background:var(--bg2);gap:8px}
+#editor{flex:1;min-height:0;overflow:auto}
+#editor .cm-editor{height:100%;font-size:13.5px}#editor .cm-scroller{font-family:var(--mono)}
+#editor textarea{width:100%;height:100%;border:0;outline:0;resize:none;padding:14px;font:13.5px/1.6 var(--mono);background:var(--bg);color:var(--fg);tab-size:2}
+#stage{flex:1;position:relative;min-height:0;background:var(--bg)}
+#stage iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:#fff}
+#err{display:none;flex:none;max-height:45%;overflow:auto;border-top:1px solid var(--red);background:var(--redbg);padding:12px 14px;font:12.5px/1.55 var(--mono);color:var(--red);white-space:pre-wrap}
+#err b{display:block;font-family:var(--sans);font-size:12px;letter-spacing:.04em;margin-bottom:4px}
+#log{flex:none;height:96px;white-space:pre-wrap;overflow:auto;border-top:1px solid var(--bd);padding:8px 14px;font:11.5px/1.6 var(--mono);color:var(--mut);background:var(--bg2)}
+@media (max-width:800px){main{grid-template-columns:1fr;grid-template-rows:1fr 1fr}.pane+.pane{border-left:0;border-top:1px solid var(--bd)}header .hide{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Playground <span>/ 左边改代码，右边实时渲染</span></div>
+  <a class="hide" href="../../#/2026-10-17-live-code-playground">← 回到笔记</a>
+  <div class="sp"></div>
+  <div class="status"><i class="dot" id="dot"></i><span id="stat">加载中…</span></div>
+  <select id="pick" aria-label="示例"></select>
+  <button id="reset" title="销毁并重建 iframe">重建沙箱</button>
+</header>
+<main>
+  <section class="pane">
+    <div class="ph">App.tsx <span id="edkind"></span></div>
+    <div id="editor"></div>
+  </section>
+  <section class="pane">
+    <div class="ph">Preview · iframe sandbox="allow-scripts" · srcdoc（opaque origin）</div>
+    <div id="stage"></div>
+    <div id="err"></div>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script type="module">
+// ====== 版本全部锁死：CDN 不锁版本 = 某天上游发版，你的页面就变了 ======
+const SUCRASE = "https://esm.sh/sucrase@3.35.0";
+const REACT = "https://esm.sh/react@18.3.1";
+const REACT_DOM = "https://esm.sh/react-dom@18.3.1";
+const RENDER_TIMEOUT_MS = 3000; // N 秒内收不到 rendered 回执 → 判定卡死，重建 iframe
+const DEBOUNCE_MS = 300;
+
+const SNIPPETS = {
+  "计数器 Counter": `import { useState } from "react";
+
+export default function App() {
+  const [n, setN] = useState(0);
+  return (
+    <div style={{ fontFamily: "system-ui", padding: 32 }}>
+      <h1 style={{ margin: 0 }}>Count: {n}</h1>
+      <p style={{ color: "#666" }}>改一下左边的代码，右边 300ms 后自动刷新</p>
+      <button onClick={() => setN(n + 1)} style={{ fontSize: 16, padding: "8px 16px" }}>
+        +1
+      </button>
+    </div>
+  );
+}
+`,
+  "带 key 的列表 List": `import { useState } from "react";
+
+type Todo = { id: number; text: string; done: boolean };
+
+export default function App() {
+  const [todos, setTodos] = useState<Todo[]>([
+    { id: 1, text: "读一遍 sandbox 属性", done: true },
+    { id: 2, text: "给 iframe 加渲染回执", done: false },
+    { id: 3, text: "把运行时错误回传给 LLM", done: false },
+  ]);
+  const toggle = (id: number) =>
+    setTodos(ts => ts.map(t => (t.id === id ? { ...t, done: !t.done } : t)));
+  return (
+    <ul style={{ fontFamily: "system-ui", padding: 32, lineHeight: 2 }}>
+      {todos.map(t => (
+        // key 用稳定的业务 id，而不是数组下标
+        <li key={t.id} onClick={() => toggle(t.id)} style={{ cursor: "pointer" }}>
+          <input type="checkbox" readOnly checked={t.done} /> {t.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+`,
+  "故意出错 Broken": `export default function App() {
+  const user: any = undefined;
+  // 渲染时访问 undefined 的属性 → 被 ErrorBoundary 捕获，回传给父页面
+  return <h1>Hello, {user.name}</h1>;
+}
+`,
+  "沙箱隔离检查 Security": `function probe(label: string, fn: () => unknown) {
+  try { return [label, "⚠️ 可访问：" + String(fn()).slice(0, 40)]; }
+  catch (e: any) { return [label, "✅ 被拦截：" + e.name]; }
+}
+
+export default function App() {
+  const rows = [
+    probe("document.cookie", () => document.cookie),
+    probe("localStorage", () => localStorage.length),
+    probe("window.parent.document", () => window.parent.document.title),
+    probe("top.location.href", () => window.top!.location.href),
+  ];
+  return (
+    <div style={{ fontFamily: "system-ui", padding: 32 }}>
+      <h2>沙箱里的代码能碰到什么？</h2>
+      <p>origin = <code>{String(window.origin)}</code></p>
+      <table cellPadding={6}>
+        <tbody>{rows.map(([k, v]) => <tr key={k}><td><code>{k}</code></td><td>{v}</td></tr>)}</tbody>
+      </table>
+    </div>
+  );
+}
+`,
+  "死循环 Infinite loop": `export default function App() {
+  // 主线程被卡死：父页面 ${RENDER_TIMEOUT_MS / 1000} 秒收不到 rendered 回执，会销毁并重建 iframe
+  while (true) {}
+  return <div>never</div>;
+}
+`,
+};
+
+// ====== iframe 里运行的页面（srcdoc）======
+const SANDBOX_HTML = `<!doctype html><html><head><meta charset="utf-8">
+<script type="importmap">${JSON.stringify({ imports: {
+  "react": REACT, "react/": REACT + "/", "react/jsx-runtime": REACT + "/jsx-runtime",
+  "react-dom": REACT_DOM, "react-dom/client": REACT_DOM + "/client",
+}})}<\/script>
+<style>body{margin:0;font-family:system-ui;color:#171717;background:#fff}</style></head>
+<body><div id="root"></div>
+<script type="module">
+import React from "react";
+import { createRoot } from "react-dom/client";
+let root = null, runId = 0, parentWin = window.parent;
+const post = (msg) => parentWin.postMessage({ ...msg, runId }, "*"); // 父页面是什么 origin 都行：消息里只有结果
+const fmt = (e) => (e && (e.stack || e.message)) || String(e);
+
+// 运行时错误：渲染之外的错误（事件回调、setTimeout、Promise）
+window.onerror = (msg, src, line, col, err) => { post({ type: "error", phase: "runtime", message: fmt(err || msg) }); };
+window.addEventListener("unhandledrejection", (e) => post({ type: "error", phase: "runtime", message: fmt(e.reason) }));
+
+// 渲染期错误：ErrorBoundary 兜住，避免白屏
+class Boundary extends React.Component {
+  state = { error: null };
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error) { post({ type: "error", phase: "render", message: fmt(error) }); }
+  render() {
+    return this.state.error
+      ? React.createElement("pre", { style: { color: "#e5484d", padding: 16, whiteSpace: "pre-wrap" } }, "渲染出错：" + this.state.error.message)
+      : this.props.children;
+  }
+}
+// commit 完成后再回执，证明"真的渲染出来了"
+function Ack({ children }) { React.useEffect(() => post({ type: "rendered" }), []); return children; }
+
+window.addEventListener("message", async (e) => {
+  if (e.source !== parentWin || e.data?.type !== "run") return;
+  runId = e.data.runId;
+  const url = URL.createObjectURL(new Blob([e.data.code], { type: "text/javascript" }));
+  try {
+    const mod = await import(url);          // 每次一个新 Blob URL → 模块不会被缓存
+    const App = mod.default;
+    if (typeof App !== "function") throw new Error("请 export default 一个 React 组件");
+    root?.unmount();                         // 卸载旧树，干净地重新挂载
+    root = createRoot(document.getElementById("root"));
+    root.render(React.createElement(Boundary, null, React.createElement(Ack, null, React.createElement(App))));
+  } catch (err) {
+    post({ type: "error", phase: "module", message: fmt(err) }); // import 失败 / 顶层代码抛错
+  } finally { URL.revokeObjectURL(url); }
+});
+post({ type: "ready" });
+<\/script></body></html>`;
+
+// ====== 父页面 ======
+const $ = (id) => document.getElementById(id);
+const log = (s) => { const t = new Date().toLocaleTimeString(); $("log").textContent = `[${t}] ${s}\n` + $("log").textContent; };
+const setStat = (cls, s) => { $("dot").className = "dot " + cls; $("stat").textContent = s; window.__status = cls; };
+const showErr = (title, msg) => { $("err").style.display = msg ? "block" : "none"; $("err").innerHTML = msg ? `<b>${title}</b>` : ""; if (msg) $("err").append(msg); };
+
+let frame, ready, runId = 0, watchdog, lastCode = "";
+let markReady;
+
+function buildFrame() {
+  frame?.remove();
+  frame = document.createElement("iframe");
+  frame.setAttribute("sandbox", "allow-scripts");   // 关键：没有 allow-same-origin
+  frame.setAttribute("title", "preview");
+  frame.srcdoc = SANDBOX_HTML;
+  ready = new Promise((r) => (markReady = r));
+  $("stage").append(frame);
+}
+
+window.addEventListener("message", (e) => {
+  if (!frame || e.source !== frame.contentWindow) return; // 只认自己的 iframe（origin 是 "null"，只能比 source）
+  const m = e.data || {};
+  if (m.type === "ready") return markReady();
+  if (m.runId !== runId) return;                          // 丢掉过期 run 的消息
+  if (m.type === "rendered") { clearTimeout(watchdog); setStat("ok", `已渲染 #${runId}`); log(`run #${runId} rendered`); window.__rendered = runId; }
+  if (m.type === "error") {
+    clearTimeout(watchdog);
+    setStat("err", `${m.phase} error`);
+    showErr(`运行时错误（${m.phase}）· 在 Agent 里这段会回传给 LLM 自修复`, m.message);
+    log(`run #${runId} ${m.phase} error: ${String(m.message).split("\n")[0]}`);
+  }
+});
+
+let transform;
+async function run(src) {
+  const id = ++runId;
+  let code;
+  try {
+    code = transform(src, { transforms: ["jsx", "typescript"], jsxRuntime: "automatic", production: true }).code;
+  } catch (err) {
+    setStat("err", "compile error");
+    showErr("编译错误（父页面 · sucrase）", err.message);
+    log(`run #${id} compile error`);
+    return;
+  }
+  showErr("", "");
+  setStat("busy", `渲染中 #${id}`);
+  await ready;
+  if (id !== runId) return;
+  frame.contentWindow.postMessage({ type: "run", code, runId: id }, "*");
+  clearTimeout(watchdog);
+  watchdog = setTimeout(() => {            // 看门狗：死循环 / 卡死 → 销毁重建
+    setStat("err", "超时，已重建沙箱");
+    showErr("渲染超时", `${RENDER_TIMEOUT_MS}ms 内没有收到 rendered 回执，可能是死循环。已销毁并重建 iframe。`);
+    log(`run #${id} timeout → rebuild iframe`);
+    buildFrame();
+    window.__rebuilt = (window.__rebuilt || 0) + 1;
+  }, RENDER_TIMEOUT_MS);
+}
+
+let timer;
+const schedule = (src) => { clearTimeout(timer); timer = setTimeout(() => { lastCode = src; run(src); }, DEBOUNCE_MS); };
+
+// ====== 编辑器：CodeMirror 6，加载失败就退回 textarea ======
+let getCode, setCode;
+async function initEditor(initial) {
+  try {
+    const [{ EditorView, basicSetup }, { javascript }] = await Promise.all([
+      import("https://esm.sh/codemirror@6.0.1?deps=@codemirror/state@6.7.6,@codemirror/view@6.43.14"),
+      import("https://esm.sh/@codemirror/lang-javascript@6.2.2?deps=@codemirror/state@6.7.6,@codemirror/view@6.43.14"),
+    ]);
+    const view = new EditorView({
+      doc: initial, parent: $("editor"),
+      extensions: [basicSetup, javascript({ jsx: true, typescript: true }),
+        EditorView.updateListener.of((u) => u.docChanged && schedule(u.state.doc.toString()))],
+    });
+    getCode = () => view.state.doc.toString();
+    setCode = (s) => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: s } });
+    $("edkind").textContent = "· CodeMirror 6";
+    window.__editor = "codemirror";
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.spellcheck = false; ta.value = initial; $("editor").append(ta);
+    ta.addEventListener("input", () => schedule(ta.value));
+    getCode = () => ta.value; setCode = (s) => { ta.value = s; schedule(s); };
+    $("edkind").textContent = "· textarea fallback";
+    window.__editor = "textarea";
+  }
+}
+
+const pick = $("pick");
+for (const k of Object.keys(SNIPPETS)) pick.add(new Option(k, k));
+pick.onchange = () => setCode(SNIPPETS[pick.value]);
+$("reset").onclick = () => { buildFrame(); run(getCode()); };
+
+buildFrame();
+const [sucrase] = await Promise.all([import(SUCRASE), initEditor(SNIPPETS[pick.value])]);
+transform = sucrase.transform;
+run(getCode());
+window.__playground = { setCode, getCode, pick: (k) => { pick.value = k; pick.onchange(); } };
+</script>
+</body>
+</html>

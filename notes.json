@@ -1,5 +1,22 @@
 [
   {
+    "slug": "2026-10-17-live-code-playground",
+    "date": "2026-10-17",
+    "title": "左边改代码、右边实时渲染：Live Code Playground",
+    "tags": [
+      "沙箱",
+      "iframe",
+      "Agent",
+      "前端架构"
+    ],
+    "summary": "Artifacts / v0 式实时预览的四段流水线：sucrase 浏览器编译、import map 拉依赖、sandboxed iframe 执行、ErrorBoundary + 看门狗兜底，以及错误回传给 LLM 自修复。附可在线运行的 Playground。",
+    "files": [
+      "index.html",
+      "test.mjs",
+      "README.md"
+    ]
+  },
+  {
     "slug": "2026-10-16-llm-rate-limit-capacity",
     "date": "2026-10-16",
     "title": "LLM 容量估算与限流：周一高峰的 AI 代码评审",
