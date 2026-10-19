@@ -70,7 +70,7 @@ artifact_versions(id, artifact_id, version_no, parent_version_id,
 1. **记下这次切换**：把父节点的 `selected_child_id` 改成第 2 个孩子；
 2. **往下走到叶子**：从这个孩子出发，沿每个节点的 `selected_child_id`（没选过就取最新的孩子）一直走到没有孩子的节点，写回 `current_leaf_id`；
 3. **只加载当前路径**：从 `current_leaf_id` 沿 `parent_id` 递归到根，再倒序；
-4. **兄弟计数**：只查路径上那些节点的兄弟，用窗口函数顺手算出 `<idx/total>`。
+4. **兄弟计数**：只查路径上那些节点的兄弟，用窗口函数顺手算出 `< 2/3 >` 里的两个数字。
 
 ```sql
 WITH RECURSIVE path(id, parent_id, depth) AS (
