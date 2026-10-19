@@ -1,5 +1,25 @@
 [
   {
+    "slug": "2026-10-19-chat-branch-artifact-schema",
+    "date": "2026-10-19",
+    "title": "聊天分支、流式中断与 Artifact 版本：怎么建表",
+    "tags": [
+      "数据建模",
+      "Postgres",
+      "流式",
+      "Agent"
+    ],
+    "summary": "ChatGPT 式 < 2/3 > 分支用 parent_id 树 + selected_child_id + current_leaf_id，只递归加载当前路径；流到一半中断标 interrupted、保留半截、不自动重跑；artifact 存整份快照，用工作区指针 + 乐观锁。附真 SQLite 跑的 demo。",
+    "files": [
+      "schema.sql",
+      "chat.ts",
+      "demo.ts",
+      "test.sh",
+      "package.json",
+      "README.md"
+    ]
+  },
+  {
     "slug": "2026-10-17-live-code-playground",
     "date": "2026-10-17",
     "title": "左边改代码、右边实时渲染：Live Code Playground",

@@ -1,0 +1,7 @@
+{
+  "name": "chat-branch-artifact-schema",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "bash test.sh" },
+  "dependencies": { "sql.js": "^1.13.0", "tsx": "^4.19.0" }
+}
