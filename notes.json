@@ -1,5 +1,31 @@
 [
   {
+    "slug": "2026-10-24-llm-cost-guardrails",
+    "date": "2026-10-24",
+    "title": "LLM 费用失控护栏：一个 Agent 死循环烧掉整月预算",
+    "tags": [
+      "护栏",
+      "预算",
+      "断路器",
+      "背压",
+      "Agent"
+    ],
+    "summary": "死循环不只是重试次数的问题：run 级要看步数/花费/时长/重复动作，多 run 叠加要靠用户级预算（预占+结算）；速率类限制可排队、额度类限制直接拒绝（429 vs 402）；断路器状态放数据库+Redis 并原子更新；队列有界，满了背压。附离线可跑的 TS demo。",
+    "files": [
+      "store.ts",
+      "errors.ts",
+      "budget.ts",
+      "run-guard.ts",
+      "scheduler.ts",
+      "breaker.ts",
+      "index.ts",
+      "demo.ts",
+      "test.sh",
+      "package.json",
+      "README.md"
+    ]
+  },
+  {
     "slug": "2026-10-19-chat-branch-artifact-schema",
     "date": "2026-10-19",
     "title": "聊天分支、流式中断与 Artifact 版本：怎么建表",

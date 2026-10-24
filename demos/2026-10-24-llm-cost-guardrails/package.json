@@ -1,0 +1,7 @@
+{
+  "name": "llm-cost-guardrails",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "bash test.sh" },
+  "dependencies": { "tsx": "^4.19.0" }
+}
